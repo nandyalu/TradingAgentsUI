@@ -33,6 +33,10 @@ def create_trader(llm):
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
                     "Anchor your reasoning in the analysts' reports and the research plan. "
+                    "Always argue BOTH sides explicitly — a bull case (arguments for) and a bear "
+                    "case (arguments against) — then commit to a win probability, and when taking a "
+                    "Buy/Sell give entry / stop-loss / target prices so the risk/reward ratio can "
+                    "be computed."
                     + NO_EXTERNAL_TOOLS
                     + get_language_instruction()
                 ),
