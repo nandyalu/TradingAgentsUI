@@ -209,9 +209,11 @@ class TestCheckpointSignature(unittest.TestCase):
         self.assertNotEqual(base, g._run_signature("stock"))      # debate depth
         g.config = {"max_debate_rounds": 1, "max_risk_discuss_rounds": 5}
         self.assertNotEqual(base, g._run_signature("stock"))      # risk depth
-        # Stable for identical inputs.
         g.config = {"max_debate_rounds": 1, "max_risk_discuss_rounds": 1}
+        self.assertNotEqual(base, g._run_signature("stock", "swing"))  # horizon
+        # Stable for identical inputs.
         self.assertEqual(base, g._run_signature("stock"))
+        self.assertEqual(base, g._run_signature("stock", "position"))
 
 
 if __name__ == "__main__":
