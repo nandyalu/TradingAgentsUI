@@ -42,6 +42,7 @@ from tradingagents.agents.utils.structured import (
 )
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
+from tradingagents.dataflows.web_search import web_search_financial
 
 
 def _seven_days_back(trade_date: str) -> str:
@@ -78,7 +79,15 @@ def create_sentiment_analyst(llm):
             news_block=news_block,
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
+            web_block=web_block,
         )
+
+        # Step 1: If primary social sources are unavailable, supplement with web search
+        _unavailable_marker = "<unavailable>"
+        if _unavailable_marker in stocktwits_block or _unavailable_marker in reddit_block:
+            web_block = web_search_financial(ticker, limit=5)
+        else:
+            web_block = ""
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -131,6 +140,7 @@ def _build_system_message(
     news_block: str,
     stocktwits_block: str,
     reddit_block: str,
+    web_block: str = "",
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
     return f"""You are a financial market sentiment analyst. Your task is to produce a comprehensive sentiment report for {ticker} covering the period from {start_date} to {end_date}, drawing on three complementary data sources that have already been collected for you.
@@ -157,6 +167,13 @@ Community discussion. Engagement signal via upvote score and comment count. Subr
 <start_of_reddit>
 {reddit_block}
 <end_of_reddit>
+
+### Web search results — supplementary context (only present when primary social sources were unavailable)
+Additional web results fetched to compensate for missing StockTwits/Reddit data.
+
+<start_of_web_search>
+{web_block if web_block else "N/A — primary social sources were available; no supplementary search performed."}
+<end_of_web_search>
 
 ## How to analyze this data (best practices)
 
