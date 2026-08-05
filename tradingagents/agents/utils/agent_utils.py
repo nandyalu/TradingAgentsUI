@@ -43,6 +43,7 @@ __all__ = [
     "resolve_instrument_identity",
     "get_instrument_context_from_state",
     "get_language_instruction",
+    "get_horizon_instruction",
     "create_msg_delete",
 ]
 
@@ -63,6 +64,35 @@ def get_language_instruction() -> str:
     if lang.strip().lower() == "english":
         return ""
     return f" Write your entire response in {lang}."
+
+
+def get_horizon_instruction(state: Mapping[str, Any] | None) -> str:
+    """Return a prompt instruction biasing the decision toward the run's
+    trade horizon — ``state["horizon"]`` is ``"swing"`` (a few days) or
+    ``"position"`` (a multi-month hold), set at run start (see
+    ``Propagator.create_initial_state``). Applied to the research manager,
+    trader, and portfolio manager, i.e. the three decision-making stages —
+    not the analysts, whose reports describe the instrument regardless of
+    how long the reader intends to hold it.
+
+    Defaults to "position" when absent or ``state`` isn't a mapping (bare
+    programmatic states, tests), matching the graph's own default.
+    """
+    horizon = str((state or {}).get("horizon") or "position").strip().lower() \
+        if isinstance(state, Mapping) else "position"
+    if horizon == "swing":
+        return (
+            " Trade horizon: SWING — this recommendation is for a short "
+            "holding period of a few days. Weight near-term momentum, "
+            "technical setup, and immediate catalysts over long-term "
+            "fundamentals; a 6-month thesis is out of scope."
+        )
+    return (
+        " Trade horizon: POSITION — this recommendation is for a multi-month "
+        "hold (around 6 months). Weight durable trends and fundamentals over "
+        "short-term noise; where relevant, give an explicit price target and "
+        "time horizon."
+    )
 
 
 def _clean_identity_value(value: Any) -> str | None:

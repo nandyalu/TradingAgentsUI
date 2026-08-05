@@ -6,8 +6,71 @@ CLI and ``TradingAgentsGraph.save_reports`` both call this, so a headless / API
 run produces the same on-disk report tree a CLI run does.
 """
 
+import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+
+from tradingagents.agents.utils.rating import parse_rating
+
+# Matches the deterministic header render_sentiment_report() prepends to
+# sentiment_report, e.g. "**Overall Sentiment:** **Bullish** (Score: 7.2/10)".
+_SENTIMENT_HEADER_RE = re.compile(
+    r"\*\*Overall Sentiment:\*\*\s*\*\*([^*]+)\*\*\s*\(Score:\s*([\d.]+)/10\)"
+)
+# Matches render_pm_decision()'s optional lines, e.g.
+# "**Price Target**: 215.5" / "**Time Horizon**: 3-6 months".
+_PRICE_TARGET_RE = re.compile(r"\*\*Price Target\*\*:\s*([^\n]+)")
+_TIME_HORIZON_RE = re.compile(r"\*\*Time Horizon\*\*:\s*([^\n]+)")
+
+
+def extract_screen_summary(final_state: dict) -> dict[str, Any]:
+    """Pull a compact, structured summary out of a completed run's final
+    state — the fields a screener result table wants (direction, sentiment,
+    price target / time horizon) without re-parsing prose by hand.
+
+    Reads fields TradingAgents' agents already produce as structured output
+    (``PortfolioDecision.price_target``/``time_horizon``, the Sentiment
+    Analyst's ``SentimentReport`` header) rather than asking any agent for a
+    new "6-month potential" field — those already exist, just rendered to
+    markdown for the saved report. Every field is best-effort: missing or
+    unparseable input yields ``None``, never an exception, so a screener run
+    on many tickers isn't derailed by one odd report.
+    """
+    empty = {
+        "direction": None,
+        "sentiment_band": None,
+        "sentiment_score": None,
+        "price_target": None,
+        "time_horizon": None,
+    }
+    if not isinstance(final_state, dict):
+        return empty
+
+    final_trade_decision = final_state.get("final_trade_decision") or ""
+    sentiment_report = final_state.get("sentiment_report") or ""
+
+    direction = parse_rating(final_trade_decision) if final_trade_decision else None
+
+    sentiment_match = _SENTIMENT_HEADER_RE.search(sentiment_report)
+    sentiment_band = sentiment_match.group(1).strip() if sentiment_match else None
+    sentiment_score = None
+    if sentiment_match:
+        try:
+            sentiment_score = float(sentiment_match.group(2))
+        except ValueError:
+            pass
+
+    price_target_match = _PRICE_TARGET_RE.search(final_trade_decision)
+    time_horizon_match = _TIME_HORIZON_RE.search(final_trade_decision)
+
+    return {
+        "direction": direction,
+        "sentiment_band": sentiment_band,
+        "sentiment_score": sentiment_score,
+        "price_target": price_target_match.group(1).strip() if price_target_match else None,
+        "time_horizon": time_horizon_match.group(1).strip() if time_horizon_match else None,
+    }
 
 
 def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:

@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import (
+    get_horizon_instruction,
     get_instrument_context_from_state,
     get_language_instruction,
 )
@@ -38,6 +39,7 @@ def create_trader(llm):
                     "Buy/Sell give entry / stop-loss / target prices so the risk/reward ratio can "
                     "be computed."
                     + NO_EXTERNAL_TOOLS
+                    + get_horizon_instruction(state)
                     + get_language_instruction()
                 ),
             },
