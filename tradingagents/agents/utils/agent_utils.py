@@ -66,7 +66,6 @@ def get_language_instruction() -> str:
     return f" Write your entire response in {lang}."
 
 
-<<<<<<< HEAD
 def opponent_argument_or_opening(text: str, opponent: str) -> str:
     """Opponent's latest argument, or an explicit opening marker when empty.
 
@@ -79,7 +78,8 @@ def opponent_argument_or_opening(text: str, opponent: str) -> str:
     if text:
         return text
     return f"(The {opponent} has not spoken yet — open the debate with your own case.)"
-=======
+
+
 def get_horizon_instruction(state: Mapping[str, Any] | None) -> str:
     """Return a prompt instruction biasing the decision toward the run's
     trade horizon — ``state["horizon"]`` is ``"swing"`` (a few days) or
@@ -107,7 +107,6 @@ def get_horizon_instruction(state: Mapping[str, Any] | None) -> str:
         "short-term noise; where relevant, give an explicit price target and "
         "time horizon."
     )
->>>>>>> d9e700c (feat(screener): add candidate screener script and trade-horizon-aware analysis)
 
 
 def _clean_identity_value(value: Any) -> str | None:

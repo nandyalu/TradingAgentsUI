@@ -48,7 +48,10 @@ def test_trader_prompt_states_constraint():
     from tradingagents.agents.schemas import TraderAction, TraderProposal
 
     captured = {}
-    llm = _capturing_llm(captured, TraderProposal(action=TraderAction.BUY, reasoning="x"))
+    llm = _capturing_llm(captured, TraderProposal(
+        action=TraderAction.BUY, reasoning="x",
+        bull_case="x", bear_case="x", win_probability=50.0,
+    ))
     create_trader(llm)({
         "company_of_interest": "NVDA",
         "investment_plan": "**Recommendation**: Buy",
