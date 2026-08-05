@@ -6,6 +6,7 @@ from tradingagents.agents.researchers.bull_researcher import create_bull_researc
 
 def _state():
     return {
+        "company_of_interest": "NVDA",
         "investment_debate_state": {
             "history": "",
             "bull_history": "",

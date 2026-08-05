@@ -72,6 +72,14 @@ def create_sentiment_analyst(llm):
         stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
         reddit_block = fetch_reddit_posts(ticker)
 
+        # If primary social sources are unavailable, supplement with web search.
+        # Must run before _build_system_message — it needs web_block's value.
+        _unavailable_marker = "<unavailable>"
+        if _unavailable_marker in stocktwits_block or _unavailable_marker in reddit_block:
+            web_block = web_search_financial(ticker, limit=5)
+        else:
+            web_block = ""
+
         system_message = _build_system_message(
             ticker=ticker,
             start_date=start_date,
@@ -81,13 +89,6 @@ def create_sentiment_analyst(llm):
             reddit_block=reddit_block,
             web_block=web_block,
         )
-
-        # Step 1: If primary social sources are unavailable, supplement with web search
-        _unavailable_marker = "<unavailable>"
-        if _unavailable_marker in stocktwits_block or _unavailable_marker in reddit_block:
-            web_block = web_search_financial(ticker, limit=5)
-        else:
-            web_block = ""
 
         prompt = ChatPromptTemplate.from_messages(
             [
