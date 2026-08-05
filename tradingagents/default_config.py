@@ -25,6 +25,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
+    "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
 }
 
 
@@ -96,10 +98,15 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # variation on models that honor it; reasoning models largely ignore it
     # and no setting makes LLM output bit-identical across runs (see README).
     "temperature": None,
-    # SDK retry budget forwarded to every provider chat client. None leaves each
-    # provider/SDK at its own default (usually 2). Raise it to ride out bursty
-    # 429 throttling on rate-limited deployments instead of aborting a run (#1091).
+    # LLM resilience: retry budget and per-request timeout. `llm_max_retries` is
+    # both the openai SDK's HTTP retry count AND the budget for
+    # NormalizedChatOpenAI's invoke-level retry of transient parse/timeout
+    # failures (so a single malformed/non-JSON response is retried, not fatal);
+    # `llm_timeout` (seconds) bounds each request. None leaves the SDK defaults
+    # (max_retries=2, no explicit timeout). Env: TRADINGAGENTS_LLM_MAX_RETRIES /
+    # TRADINGAGENTS_LLM_TIMEOUT.
     "llm_max_retries": None,
+    "llm_timeout": None,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
