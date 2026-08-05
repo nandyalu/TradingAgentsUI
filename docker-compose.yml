@@ -3,6 +3,7 @@ services:
     build: .
     env_file:
       - .env
+    network_mode: host
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     tty: true

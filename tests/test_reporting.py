@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.reporting import write_report_tree
+from tradingagents.reporting import extract_screen_summary, write_report_tree
 
 
 def _state():
@@ -48,3 +48,39 @@ def test_save_reports_defaults_under_results_dir(tmp_path):
     assert out.exists()
     assert out.parent.parent.name == "reports"  # results_dir/reports/AAPL_<stamp>/...
     assert out.parent.name.startswith("AAPL_")
+
+
+@pytest.mark.unit
+def test_extract_screen_summary_parses_structured_fields():
+    final_state = {
+        "final_trade_decision": (
+            "**Rating**: Buy\n\n"
+            "**Executive Summary**: Strong momentum.\n\n"
+            "**Investment Thesis**: Blah blah.\n\n"
+            "**Price Target**: 215.5\n\n"
+            "**Time Horizon**: 3-6 months"
+        ),
+        "sentiment_report": (
+            "**Overall Sentiment:** **Bullish** (Score: 7.2/10)\n"
+            "**Confidence:** High\n\n"
+            "Narrative text here."
+        ),
+    }
+    summary = extract_screen_summary(final_state)
+    assert summary["direction"] == "Buy"
+    assert summary["sentiment_band"] == "Bullish"
+    assert summary["sentiment_score"] == 7.2
+    assert summary["price_target"] == "215.5"
+    assert summary["time_horizon"] == "3-6 months"
+
+
+@pytest.mark.unit
+def test_extract_screen_summary_missing_fields_are_none():
+    summary = extract_screen_summary({})
+    assert summary == {
+        "direction": None,
+        "sentiment_band": None,
+        "sentiment_score": None,
+        "price_target": None,
+        "time_horizon": None,
+    }

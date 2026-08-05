@@ -393,21 +393,24 @@ class TradingAgentsGraph:
         td = str(trade_date)
         return td if td < datetime.now().strftime("%Y-%m-%d") else None
 
-    def _run_signature(self, asset_type: str) -> str:
+    def _run_signature(self, asset_type: str, horizon: str = "position") -> str:
         """Graph-shape inputs that must invalidate a checkpoint if changed.
 
         Keyed into the checkpoint thread ID so a resume under a different analyst
-        selection, debate/risk depth, or asset mode starts fresh instead of
-        silently continuing the previous graph (#1089).
+        selection, debate/risk depth, asset mode, or trade horizon starts fresh
+        instead of silently continuing the previous graph (#1089) — a horizon
+        change flips the research/trader/PM prompts, so a stale checkpoint would
+        otherwise resume mid-debate under the wrong instructions.
         """
         return "|".join([
             "analysts=" + ",".join(self.selected_analysts),
             f"debate={self.config['max_debate_rounds']}",
             f"risk={self.config['max_risk_discuss_rounds']}",
             f"asset={asset_type}",
+            f"horizon={horizon}",
         ])
 
-    def propagate(self, company_name, trade_date, asset_type: str = "stock"):
+    def propagate(self, company_name, trade_date, asset_type: str = "stock", horizon: str = "position"):
         """Run the trading agents graph for a company on a specific date.
 
         ``asset_type`` selects between the stock pipeline (default) and the
@@ -422,19 +425,32 @@ class TradingAgentsGraph:
         when the decision had no parseable rating (#1170); guard with
         ``tradingagents.agents.utils.rating.is_review`` before mapping it to the
         PortfolioRating enum.
+
+        ``horizon`` is ``"swing"`` (a quick trade, a few days) or
+        ``"position"`` (a hold, multi-month trend) — biases the research
+        manager, trader, and portfolio manager toward that holding period
+        (see ``get_horizon_instruction``).
         """
+        if horizon not in ("swing", "position"):
+            raise ValueError(f"horizon must be 'swing' or 'position', got {horizon!r}")
+
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
         self._resolve_pending_entries(company_name)
 
-        with self.checkpoint_scope(company_name, trade_date, asset_type) as thread_id_value:
+        with self.checkpoint_scope(
+            company_name, trade_date, asset_type, horizon
+        ) as thread_id_value:
             return self._run_graph(
-                company_name, trade_date, asset_type=asset_type,
+                company_name, trade_date, asset_type=asset_type, horizon=horizon,
                 checkpoint_thread_id=thread_id_value,
             )
 
-    def begin_checkpoint(self, company_name, trade_date, asset_type: str = "stock") -> str | None:
+    def begin_checkpoint(
+        self, company_name, trade_date, asset_type: str = "stock",
+        horizon: str = "position",
+    ) -> str | None:
         """Recompile the graph with a per-ticker checkpointer and return the
         ``thread_id`` to inject into the stream/invoke ``config`` (or ``None``
         when checkpointing is disabled).
@@ -448,7 +464,7 @@ class TradingAgentsGraph:
         self._resuming = False
         if not self.config.get("checkpoint_enabled"):
             return None
-        signature = self._run_signature(asset_type)
+        signature = self._run_signature(asset_type, horizon)
         self._checkpointer_ctx = get_checkpointer(self.config["data_cache_dir"], company_name)
         saver = self._checkpointer_ctx.__enter__()
         self.graph = self.workflow.compile(checkpointer=saver)
@@ -482,19 +498,25 @@ class TradingAgentsGraph:
         self._resuming = False
 
     @contextmanager
-    def checkpoint_scope(self, company_name, trade_date, asset_type: str = "stock"):
+    def checkpoint_scope(
+        self, company_name, trade_date, asset_type: str = "stock",
+        horizon: str = "position",
+    ):
         """Context-manager form of begin/end_checkpoint for the propagate path."""
         try:
-            yield self.begin_checkpoint(company_name, trade_date, asset_type)
+            yield self.begin_checkpoint(company_name, trade_date, asset_type, horizon)
         finally:
             self.end_checkpoint()
 
-    def clear_checkpoint_on_success(self, company_name, trade_date, asset_type: str = "stock"):
+    def clear_checkpoint_on_success(
+        self, company_name, trade_date, asset_type: str = "stock",
+        horizon: str = "position",
+    ):
         """Drop a completed run's checkpoint so a later run starts fresh (#1249)."""
         if self.config.get("checkpoint_enabled"):
             clear_checkpoint(
                 self.config["data_cache_dir"], company_name, str(trade_date),
-                self._run_signature(asset_type),
+                self._run_signature(asset_type, horizon),
             )
 
     def save_reports(self, final_state, ticker, save_path=None) -> Path:
@@ -513,7 +535,7 @@ class TradingAgentsGraph:
         return write_report_tree(final_state, ticker, save_path)
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
-                   checkpoint_thread_id: str | None = None):
+                   horizon: str = "position", checkpoint_thread_id: str | None = None):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents. On a
@@ -529,6 +551,7 @@ class TradingAgentsGraph:
             asset_type=asset_type,
             past_context=past_context,
             instrument_context=instrument_context,
+            horizon=horizon,
         )
         args = self.propagator.get_graph_args()
 
@@ -575,7 +598,7 @@ class TradingAgentsGraph:
         )
 
         # Clear checkpoint on successful completion to avoid stale state.
-        self.clear_checkpoint_on_success(company_name, trade_date, asset_type)
+        self.clear_checkpoint_on_success(company_name, trade_date, asset_type, horizon)
 
         return final_state, self.process_signal(final_state["final_trade_decision"])
 
