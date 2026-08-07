@@ -44,6 +44,7 @@ __all__ = [
     "get_instrument_context_from_state",
     "get_language_instruction",
     "get_horizon_instruction",
+    "get_indicator_instruction",
     "create_msg_delete",
 ]
 
@@ -68,12 +69,16 @@ def get_language_instruction() -> str:
 
 def get_horizon_instruction(state: Mapping[str, Any] | None) -> str:
     """Return a prompt instruction biasing the decision toward the run's
-    trade horizon — ``state["horizon"]`` is ``"swing"`` (a few days) or
+    trade horizon — ``state["horizon"]`` is ``"swing"`` (1 to 2 weeks) or
     ``"position"`` (a multi-month hold), set at run start (see
     ``Propagator.create_initial_state``). Applied to the research manager,
-    trader, and portfolio manager, i.e. the three decision-making stages —
-    not the analysts, whose reports describe the instrument regardless of
-    how long the reader intends to hold it.
+    trader, and portfolio manager, i.e. the three decision-making stages.
+
+    Also applied to the market analyst via ``get_indicator_instruction``,
+    which is a narrower case: a report's prose describes the instrument
+    regardless of how long the reader intends to hold it, but *which
+    indicators are worth computing* depends directly on the holding period.
+    The news, sentiment, and fundamentals analysts stay horizon-neutral.
 
     Defaults to "position" when absent or ``state`` isn't a mapping (bare
     programmatic states, tests), matching the graph's own default.
@@ -83,15 +88,48 @@ def get_horizon_instruction(state: Mapping[str, Any] | None) -> str:
     if horizon == "swing":
         return (
             " Trade horizon: SWING — this recommendation is for a short "
-            "holding period of a few days. Weight near-term momentum, "
-            "technical setup, and immediate catalysts over long-term "
-            "fundamentals; a 6-month thesis is out of scope."
+            "holding period of roughly 1 to 2 weeks (5 to 10 trading days). "
+            "Weight near-term momentum, technical setup, and immediate "
+            "catalysts over long-term fundamentals; a 6-month thesis is out "
+            "of scope. Give a price target the position can plausibly reach "
+            "within that window, and state the time horizon in weeks or "
+            "days, never in months."
         )
     return (
         " Trade horizon: POSITION — this recommendation is for a multi-month "
         "hold (around 6 months). Weight durable trends and fundamentals over "
         "short-term noise; where relevant, give an explicit price target and "
         "time horizon."
+    )
+
+
+def get_indicator_instruction(state: Mapping[str, Any] | None) -> str:
+    """Return indicator guidance for the market analyst, matched to the run's
+    trade horizon.
+
+    The analyst's own indicator list is ordered with ``close_50_sma`` and
+    ``close_200_sma`` first, and describes the 200 SMA as "best for strategic
+    trend confirmation rather than frequent trading entries". That ordering
+    suits a multi-month hold and works against a 1-2 week one, where the
+    useful signal is in the faster averages, momentum, and volatility.
+
+    Returns empty string for the position horizon, whose needs the base
+    prompt already describes — no extra tokens for the default path.
+    """
+    horizon = str((state or {}).get("horizon") or "position").strip().lower() \
+        if isinstance(state, Mapping) else "position"
+    if horizon != "swing":
+        return ""
+    return (
+        "\n\nIMPORTANT — this analysis is for a SWING trade held roughly 1 to "
+        "2 weeks (5 to 10 trading days). Choose indicators that resolve "
+        "inside that window: close_10_ema, macd, macds, macdh, rsi, boll, "
+        "boll_ub, boll_lb, atr, vwma, and mfi. Include close_50_sma only to "
+        "locate nearby support or resistance, and do not build the thesis on "
+        "close_200_sma — a 200-day average says almost nothing about the next "
+        "10 trading days. Report support and resistance levels the price can "
+        "actually reach in that window, and read momentum and volume over the "
+        "last 10 to 20 sessions rather than the last several months."
     )
 
 
