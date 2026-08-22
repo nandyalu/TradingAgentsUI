@@ -102,3 +102,119 @@ def test_global_news_empty_after_filter_is_informative(monkeypatch):
     out = ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)
     assert "No global news found" in out
     assert "###" not in out  # no empty article body
+
+
+# --- every macro query must be represented -------------------------------------
+
+
+def _query_bucket_search(per_query_titles):
+    """A Search stub that returns different articles for each query, so a test
+    can tell which queries actually ran."""
+
+    class FakeSearch:
+        def __init__(self, query=None, **kwargs):
+            titles = per_query_titles.get(query, [])
+            self.news = [
+                {"title": t, "publisher": "P", "link": "l",
+                 "providerPublishTime": _epoch("2025-05-05")}
+                for t in titles
+            ]
+
+    return FakeSearch
+
+
+@pytest.mark.unit
+def test_every_configured_query_is_fetched(monkeypatch):
+    """The first query alone returns about as many articles as the limit, so a
+    loop that fills one list and stops never reaches the later ones. With the
+    shipped configuration that silently dropped geopolitics, central banks and
+    commodities — macro news was Federal Reserve headlines under a broader
+    name."""
+    from tradingagents.dataflows.config import get_config
+
+    queries = get_config()["global_news_queries"]
+    monkeypatch.setattr(
+        ynews.yf, "Search",
+        _query_bucket_search({q: [f"{q[:12]} article {i}" for i in range(10)] for q in queries}),
+    )
+
+    out = ynews.get_global_news_yfinance("2025-05-09", look_back_days=7, limit=10)
+
+    for query in queries:
+        assert query[:12] in out, f"nothing from {query!r} reached the report"
+
+
+@pytest.mark.unit
+def test_a_query_returning_nothing_does_not_cost_the_others_their_share(monkeypatch):
+    """One of the shipped queries returns zero articles in practice. Its unused
+    slots have to go to the topics that did return something."""
+    monkeypatch.setattr(
+        ynews.yf, "Search",
+        _query_bucket_search({
+            "a": ["a1", "a2", "a3", "a4"],
+            "b": [],
+            "c": ["c1", "c2", "c3", "c4"],
+        }),
+    )
+    monkeypatch.setattr(
+        ynews, "get_config", lambda: {"global_news_queries": ["a", "b", "c"],
+                                      "global_news_lookback_days": 7,
+                                      "global_news_article_limit": 6}
+    )
+
+    out = ynews.get_global_news_yfinance("2025-05-09")
+
+    assert out.count("###") == 6
+
+
+@pytest.mark.unit
+def test_one_failing_query_does_not_lose_every_other_topic(monkeypatch):
+    """A macro report missing commodities is worth more than no macro report."""
+    def flaky(query=None, **kwargs):
+        if query == "boom":
+            raise RuntimeError("upstream is down")
+
+        class Ok:
+            news = [{"title": "GOOD", "publisher": "P", "link": "l",
+                     "providerPublishTime": _epoch("2025-05-05")}]
+
+        return Ok()
+
+    monkeypatch.setattr(ynews.yf, "Search", flaky)
+    monkeypatch.setattr(
+        ynews, "get_config", lambda: {"global_news_queries": ["boom", "fine"],
+                                      "global_news_lookback_days": 7,
+                                      "global_news_article_limit": 10}
+    )
+
+    out = ynews.get_global_news_yfinance("2025-05-09")
+
+    assert "GOOD" in out
+
+
+@pytest.mark.unit
+def test_out_of_window_articles_do_not_consume_a_slot(monkeypatch):
+    """Truncating to the limit and filtering afterwards lets future-dated
+    articles eat slots that in-window ones would have filled."""
+    def search(query=None, **kwargs):
+        class S:
+            news = [
+                {"title": "FUTURE", "publisher": "P", "link": "l",
+                 "providerPublishTime": _epoch("2025-06-01")},
+                {"title": "KEEPER", "publisher": "P", "link": "l",
+                 "providerPublishTime": _epoch("2025-05-05")},
+            ]
+
+        return S()
+
+    monkeypatch.setattr(ynews.yf, "Search", search)
+    monkeypatch.setattr(
+        ynews, "get_config", lambda: {"global_news_queries": ["only"],
+                                      "global_news_lookback_days": 7,
+                                      "global_news_article_limit": 1}
+    )
+
+    out = ynews.get_global_news_yfinance("2025-05-09")
+
+    assert "KEEPER" in out
+    assert "FUTURE" not in out
