@@ -59,6 +59,30 @@ def _fmt(value) -> str:
     return str(value)
 
 
+def verified_levels_basis(symbol: str, curr_date: str) -> dict | None:
+    """The close and ATR that a trade plan's levels must be computed from.
+
+    ``build_verified_market_snapshot`` renders the same figures as markdown for
+    the model to read. This returns them as numbers for Python to compute with,
+    which is the difference between asking a model not to invent a price and
+    removing its opportunity to.
+
+    Returns ``None`` when there is no usable data, so the caller can fall back
+    to a proposal with no levels rather than to a guessed one.
+    """
+    try:
+        df = _verified_rows(symbol, curr_date)
+        stock_df = wrap(df.copy())
+        stock_df["atr"]  # triggers the stockstats calculation
+        close = float(df.iloc[-1]["Close"])
+        atr = float(stock_df.iloc[-1]["atr"])
+    except Exception:  # noqa: BLE001 — a missing basis must not sink the run
+        return None
+    if not (close > 0) or not (atr > 0):
+        return None
+    return {"close": close, "atr": atr}
+
+
 def build_verified_market_snapshot(
     symbol: str,
     curr_date: str,
