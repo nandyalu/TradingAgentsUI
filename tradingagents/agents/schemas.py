@@ -170,10 +170,16 @@ class TraderProposal(BaseModel):
     # from the verified close and ATR, so the arithmetic is checkable and the
     # only thing the model decides is how much room to give the trade — which
     # is the judgement worth having from it.
+    # The bounds here are deliberately loose. They exist to reject a value that
+    # is the wrong *kind* of thing, not one that is merely a bad plan.
+    # `resolve_levels` applies the judgement, because a schema violation costs
+    # the whole proposal: a run answered 10.75 and Pydantic rejected it, so the
+    # structured call failed, fell back to free text, and the reasoning and win
+    # probability went out with the one number that was unusable.
     stop_atr_multiple: float | None = Field(
         default=None,
-        ge=0.25,
-        le=10.0,
+        ge=0.1,
+        le=100.0,
         description=(
             "How far the stop sits from the entry, counted in ATRs (average "
             "true range). Typical swing trades use 1.5 to 3. Smaller means a "
@@ -185,8 +191,8 @@ class TraderProposal(BaseModel):
     )
     target_r_multiple: float | None = Field(
         default=None,
-        ge=0.25,
-        le=20.0,
+        ge=0.1,
+        le=100.0,
         description=(
             "How much the trade aims to make, as a multiple of what it risks. "
             "2 means the target is twice as far from entry as the stop is, so "
@@ -207,6 +213,10 @@ class TraderProposal(BaseModel):
         return _coerce_optional_float(v)
 
 
+MAX_SENSIBLE_STOP_ATR = 6.0
+MAX_SENSIBLE_TARGET_R = 10.0
+
+
 def resolve_levels(proposal: "TraderProposal", basis: dict | None) -> dict:
     """Turn the proposal's multiples into entry, stop and target prices.
 
@@ -223,6 +233,14 @@ def resolve_levels(proposal: "TraderProposal", basis: dict | None) -> dict:
         return empty
     stop_mult, target_mult = proposal.stop_atr_multiple, proposal.target_r_multiple
     if stop_mult is None or target_mult is None:
+        return empty
+
+    # Where the judgement lives, rather than in the schema. A swing trade stops
+    # 1.5 to 3 ATRs away; past about 6 the level is so far from the entry that
+    # it is not managing risk, and a target beyond 10R is not a plan either.
+    # Refusing here costs only the levels, and the proposal's reasoning, bull
+    # and bear cases and win probability all survive.
+    if stop_mult > MAX_SENSIBLE_STOP_ATR or target_mult > MAX_SENSIBLE_TARGET_R:
         return empty
 
     close, atr = basis["close"], basis["atr"]
