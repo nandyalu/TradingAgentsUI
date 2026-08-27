@@ -105,16 +105,15 @@ class TestRecovery:
         assert chain.calls == 2
         assert result.tool_calls
 
-    def test_it_retries_once_and_not_forever(self, caplog):
+    def test_it_retries_once_and_not_forever(self):
         """A model that does it twice is not going to do it right on the tenth
-        try, and the run still has to finish."""
+        try, and the run still has to finish. What happens to that second
+        failure is covered by TestTheThreeFixesTogether."""
         chain = Chain(Reply(content=REAL_FAILURE))
 
-        with caplog.at_level(logging.ERROR):
-            invoke_with_tool_call_recovery(chain, [], TOOLS, "Market Analyst")
+        invoke_with_tool_call_recovery(chain, [], TOOLS, "Market Analyst")
 
         assert chain.calls == 2
-        assert "did it twice" in caplog.text
 
     def test_the_first_failure_is_logged(self, caplog):
         """The whole point: this used to happen in silence."""
@@ -170,3 +169,100 @@ class TestAnsweredWithoutFetching:
         result = invoke_with_tool_call_recovery(chain, history, TOOLS, "Market Analyst")
 
         assert chain.calls == 1
+
+
+@pytest.mark.unit
+class TestParsingAPrintedCall:
+    """The last resort: salvage the turn instead of retrying it.
+
+    It has a cost worth naming. Accepting a shape the API never sent teaches
+    the loop to tolerate narration, so a model that keeps doing it keeps
+    working and nobody notices. Retrying is preferred because it leaves the
+    behaviour visible. This is for the model that narrates every time, where
+    the alternative is no data at all.
+    """
+
+    def test_the_real_failure_parses(self):
+        from tradingagents.agents.utils.tool_call_recovery import parse_printed_tool_call
+
+        calls = parse_printed_tool_call(REAL_FAILURE, TOOLS)
+
+        assert calls and calls[0]["name"] == "get_stock_data"
+        assert calls[0]["args"]["symbol"] == "AAPL"
+
+    def test_a_bare_name_and_arguments_shape_parses(self):
+        from tradingagents.agents.utils.tool_call_recovery import parse_printed_tool_call
+
+        text = '```json\n{"name": "get_indicators", "arguments": {"symbol": "AAPL"}}\n```'
+        calls = parse_printed_tool_call(text, TOOLS)
+
+        assert calls and calls[0]["name"] == "get_indicators"
+
+    def test_a_nested_function_object_parses(self):
+        from tradingagents.agents.utils.tool_call_recovery import parse_printed_tool_call
+
+        text = ('{"tool_calls": [{"function": {"name": "get_stock_data"}, '
+                '"arguments": "{\\"symbol\\": \\"AAPL\\"}"}]}')
+        calls = parse_printed_tool_call(text, TOOLS)
+
+        assert calls and calls[0]["args"] == {"symbol": "AAPL"}
+
+    def test_a_genuine_report_yields_nothing(self):
+        from tradingagents.agents.utils.tool_call_recovery import parse_printed_tool_call
+
+        assert parse_printed_tool_call("## AAPL\n\nRSI 61.4, trend intact.", TOOLS) is None
+
+    def test_a_tool_this_agent_did_not_bind_is_refused(self):
+        """A model naming a tool it was never given is not a call to recover;
+        executing it would run something nobody offered."""
+        from tradingagents.agents.utils.tool_call_recovery import parse_printed_tool_call
+
+        text = '```json\n{"name": "delete_everything", "arguments": {}}\n```'
+
+        assert parse_printed_tool_call(text, TOOLS) is None
+
+    def test_unparseable_json_yields_nothing(self):
+        from tradingagents.agents.utils.tool_call_recovery import parse_printed_tool_call
+
+        text = '```json\n{"name": "get_stock_data", "arguments": {oops\n```'
+
+        assert parse_printed_tool_call(text, TOOLS) is None
+
+
+@pytest.mark.unit
+class TestTheThreeFixesTogether:
+    """Order matters: retry first, salvage only when retrying failed.
+
+    Retrying leaves the model's behaviour visible. Salvaging hides it, so it
+    is the fallback rather than the first move — but losing the run entirely
+    is worse than either.
+    """
+
+    def test_a_salvage_does_not_happen_when_the_retry_works(self):
+        chain = Chain(Reply(content=REAL_FAILURE),
+                      Reply(tool_calls=[{"name": "get_stock_data"}]))
+
+        result = invoke_with_tool_call_recovery(chain, [], TOOLS, "Market Analyst")
+
+        assert chain.calls == 2
+        assert result.tool_calls[0]["name"] == "get_stock_data"
+        assert result.tool_calls[0].get("id") != "recovered-0"
+
+    def test_a_second_printed_call_is_salvaged_rather_than_filed_as_a_report(self, caplog):
+        chain = Chain(Reply(content=REAL_FAILURE))
+
+        with caplog.at_level(logging.ERROR):
+            result = invoke_with_tool_call_recovery(chain, [], TOOLS, "Market Analyst")
+
+        assert result.tool_calls and result.tool_calls[0]["name"] == "get_stock_data"
+        assert "executing the written-out call" in caplog.text
+
+    def test_an_unsalvageable_narration_says_so(self, caplog):
+        """A plan naming no tool cannot be recovered, and the run has to end
+        somewhere. It must not end quietly."""
+        chain = Chain(Reply(content="### Phase 1: Planning\n\nA swing trade aims to..."))
+
+        with caplog.at_level(logging.ERROR):
+            invoke_with_tool_call_recovery(chain, [], TOOLS, "Market Analyst")
+
+        assert "nothing could be salvaged" in caplog.text
