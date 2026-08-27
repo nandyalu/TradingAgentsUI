@@ -28,10 +28,23 @@ prompt decides it, which is why the recovery here retries rather than giving up.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 
 logger = logging.getLogger(__name__)
+
+# Added to every analyst's preamble. The failure this addresses is not a
+# capability problem: given "Get me AAPL's price data from 2026-07-27 to
+# 2026-08-27" the same model made a correct call every time, and given "think
+# aloud about your plan first, in detail, before doing anything" it narrated
+# every time. The prompt decides it, so the prompt says so plainly.
+CALL_DO_NOT_DESCRIBE = (
+    " Call the tools. Do not write out a plan first, and do not describe the"
+    " call you are about to make: a tool call written as text is not a tool"
+    " call, the data never arrives, and your description becomes the report."
+    " Fetch first, then write the report from what comes back."
+)
 
 # A fenced block, or the literal key an OpenAI-shaped call would use. Either on
 # its own is weak evidence; paired with a bound tool's name it is not.
@@ -79,6 +92,97 @@ def answered_without_ever_fetching(messages, result) -> bool:
     return True
 
 
+def parse_printed_tool_call(content: str | None, tool_names) -> list[dict] | None:
+    """Pull a written-out tool call from prose, so the turn can be salvaged.
+
+    The last resort, and the one with a cost worth naming: it teaches the loop
+    to accept a shape the API never sent, so a model that keeps narrating keeps
+    working and nobody notices it is doing the wrong thing. Retrying is
+    preferred because it leaves the model's behaviour visible.
+
+    It is here for the case retrying does not fix — a model that narrates every
+    time, where the alternative is no data at all.
+
+    Recognises the two shapes seen in real runs: an OpenAI-ish
+    ``{"tool_calls": [{"function": ..., "args": ...}]}`` and a bare
+    ``{"name": ..., "arguments": ...}``. Returns None when nothing usable is
+    found, which is the common case and must stay cheap.
+    """
+    if not content:
+        return None
+    text = str(content)
+    found: list[dict] = []
+    # Balanced-brace scan rather than a regex. A non-greedy pattern stops at
+    # the first closing brace, so {"tool_calls": [{"function": {...}}]} — a
+    # shape real runs produce — never parsed at all.
+    for blob in _json_objects(text):
+        try:
+            parsed = json.loads(blob)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for candidate in _candidates(parsed):
+            name = candidate.get("name") or candidate.get("function")
+            if isinstance(name, dict):          # {"function": {"name": ...}}
+                name = name.get("name")
+            if not name or name not in tool_names:
+                continue
+            args = (candidate.get("args") or candidate.get("arguments")
+                    or candidate.get("parameters") or {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(args, dict):
+                found.append({"name": name, "args": args, "id": f"recovered-{len(found)}"})
+    return found or None
+
+
+def _json_objects(text: str):
+    """Every balanced ``{...}`` run in ``text``, outermost first.
+
+    Quotes are tracked so a brace inside a string does not end the object, and
+    a backslash escape does not end the string.
+    """
+    depth = start = 0
+    in_string = escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                yield text[start:i + 1]
+            elif depth < 0:
+                depth = 0
+
+
+def _candidates(parsed):
+    """Every dict in a parsed blob that might be a call."""
+    if isinstance(parsed, dict):
+        if isinstance(parsed.get("tool_calls"), list):
+            for item in parsed["tool_calls"]:
+                if isinstance(item, dict):
+                    yield item
+        yield parsed
+    elif isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, dict):
+                yield item
+
+
 def invoke_with_tool_call_recovery(chain, messages, tool_names, agent_name: str):
     """Invoke ``chain``, retrying once if the model printed its call as prose.
 
@@ -108,10 +212,26 @@ def invoke_with_tool_call_recovery(chain, messages, tool_names, agent_name: str)
         agent_name, why,
     )
     retry = chain.invoke(messages)
-    if failed(retry) is not None:
+    if failed(retry) is None:
+        return retry
+
+    # Retrying was preferred and did not work. Salvage the written-out call
+    # rather than let a narration become the report, and say so loudly: this
+    # accepts a shape the API never sent, which is the thing that lets a model
+    # keep narrating without anyone noticing.
+    salvaged = parse_printed_tool_call(retry.content, tool_names)
+    if salvaged:
         logger.error(
-            "%s: did it twice. The report for this run will be ungrounded "
-            "unless the caller discards it.",
-            agent_name,
+            "%s: printed its tool call twice; executing the written-out call "
+            "%s rather than filing the narration as the report.",
+            agent_name, [c["name"] for c in salvaged],
         )
+        retry.tool_calls = salvaged
+        return retry
+
+    logger.error(
+        "%s: did it twice and nothing could be salvaged. The report for this "
+        "run will be ungrounded unless the caller discards it.",
+        agent_name,
+    )
     return retry
