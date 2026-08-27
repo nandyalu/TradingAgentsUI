@@ -25,6 +25,7 @@ from tradingagents.agents.schemas import (
     render_research_plan,
     render_sentiment_report,
     render_trader_proposal,
+    resolve_levels,
 )
 from tradingagents.agents.trader.trader import create_trader
 
@@ -61,12 +62,14 @@ class TestRenderTraderProposal:
             bull_case="Breakout on volume.",
             bear_case="Valuation stretched.",
             win_probability=62,
-            entry_price=189.5,
-            stop_loss=178.0,
-            target_price=212.5,
+            stop_atr_multiple=2.0,
+            target_r_multiple=2.0,
             position_sizing="6% of portfolio",
         )
-        md = render_trader_proposal(p)
+        # The model states distances; Python turns them into prices. Close 189.5
+        # with ATR 5.75 puts the stop 11.5 below at 178.0, and a 2R target 23.0
+        # above at 212.5 — the same levels this test used to hand in directly.
+        md = render_trader_proposal(p, resolve_levels(p, {"close": 189.5, "atr": 5.75}))
         assert "**Action**: Buy" in md
         assert "**Entry Price**: 189.5" in md
         assert "**Stop Loss**: 178.0" in md
@@ -101,11 +104,10 @@ class TestRenderTraderProposal:
             bull_case="Trend + volume.",
             bear_case="Thin liquidity.",
             win_probability=60,
-            entry_price=100.0,
-            stop_loss=90.0,
-            target_price=130.0,
+            stop_atr_multiple=2.0,
+            target_r_multiple=3.0,
         )
-        md = render_trader_proposal(p)
+        md = render_trader_proposal(p, resolve_levels(p, {"close": 100.0, "atr": 5.0}))
         assert "**Risk/Reward Ratio**: 3.00 : 1" in md
         assert "**Expected Value**: +1.40R (favorable)" in md
         assert "**Breakeven Win-Rate**: 25%" in md
@@ -120,11 +122,10 @@ class TestRenderTraderProposal:
             bull_case="Possible bounce.",
             bear_case="Downtrend intact.",
             win_probability=35,
-            entry_price=100.0,
-            stop_loss=90.0,
-            target_price=110.0,
+            stop_atr_multiple=2.0,
+            target_r_multiple=1.0,
         )
-        md = render_trader_proposal(p)
+        md = render_trader_proposal(p, resolve_levels(p, {"close": 100.0, "atr": 5.0}))
         assert "(unfavorable)" in md
         assert "below breakeven" in md
 
@@ -142,13 +143,11 @@ class TestNullishFloatCoercion:
                 bull_case="b",
                 bear_case="c",
                 win_probability=50,
-                entry_price=sentinel,
-                stop_loss=sentinel,
-                target_price=sentinel,
+                stop_atr_multiple=sentinel,
+                target_r_multiple=sentinel,
             )
-            assert p.entry_price is None
-            assert p.stop_loss is None
-            assert p.target_price is None
+            assert p.stop_atr_multiple is None
+            assert p.target_r_multiple is None
 
     def test_trader_real_numeric_string_still_parses(self):
         p = TraderProposal(
@@ -157,9 +156,9 @@ class TestNullishFloatCoercion:
             bull_case="b",
             bear_case="c",
             win_probability=60,
-            entry_price="189.5",
+            stop_atr_multiple="2.5",
         )
-        assert p.entry_price == 189.5
+        assert p.stop_atr_multiple == 2.5
 
     def test_pm_nullish_price_target_coerces_to_none(self):
         d = PortfolioDecision(
@@ -256,9 +255,8 @@ class TestTraderAgent:
             bull_case="Datacenter demand accelerating.",
             bear_case="Export-control overhang.",
             win_probability=64,
-            entry_price=189.5,
-            stop_loss=178.0,
-            target_price=212.0,
+            stop_atr_multiple=2.0,
+            target_r_multiple=2.0,
             position_sizing="6% of portfolio",
         )
         llm = _structured_trader_llm(captured, proposal)
@@ -266,7 +264,10 @@ class TestTraderAgent:
         result = trader(_make_trader_state())
         plan = result["trader_investment_plan"]
         assert "**Action**: Buy" in plan
-        assert "**Entry Price**: 189.5" in plan
+        # No Entry Price line: this state has no verified close or ATR, so
+        # Python has nothing to compute a level from and the proposal carries
+        # none. That is the point — an absent level, never a guessed one.
+        assert "Entry Price" not in plan
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in plan
         # The same rendered markdown is also added to messages for downstream agents.
         assert plan in result["messages"][0].content

@@ -88,17 +88,45 @@ class NormalizedChatOpenAI(ChatOpenAI):
 
 
 class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
-    """OpenAI-compatible client for arbitrary local servers (LM Studio, vLLM,
-    llama.cpp via the generic ``openai_compatible`` provider).
+    """OpenAI-compatible client for local servers: Ollama, LM Studio, vLLM,
+    llama.cpp.
 
     Their tool-calling support varies, and many reject the object-form
     ``tool_choice`` langchain sends for function-calling structured output. Bind
     the schema as a tool but don't force tool_choice, so structured output works
     across local servers regardless of the model ID's capabilities (#1057).
+
+    **Structured output defaults to ``json_schema`` here, not
+    ``function_calling``.** The capability table resolves by model ID, and a
+    local model's ID is whatever someone named the build, so no pattern can
+    recognise one. The client class can: it already knows the endpoint is a
+    local server.
+
+    The difference matters most to small models. On the function-calling path
+    the model has to produce a correctly-named tool call with correctly-typed
+    arguments unaided, and one that answers in prose instead returns nothing to
+    parse — the "structured output returned no parsed result" failure. With
+    ``json_schema`` the server constrains the sampler, so a malformed answer
+    stops being possible rather than becoming less likely. Verified against
+    ollama: a model asked to answer at length in prose returned strict
+    schema-matching JSON.
+
+    This is safe here because the agents on this path bind no external tools.
+    ``bind_structured`` is schema-only, so there is no data-fetching tool for a
+    ``response_format`` to collide with.
+
+    A server that does not support ``response_format`` raises, and
+    ``bind_structured`` already turns that into free-text generation.
     """
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
-        resolved = method or get_capabilities(self.model_name).preferred_structured_method
+        caps = get_capabilities(self.model_name)
+        # An explicit method from the caller wins. A model with a table entry
+        # saying it cannot do json_schema keeps its own preference — that entry
+        # was written from a real API refusal.
+        if method is None and caps.supports_json_schema:
+            method = "json_schema"
+        resolved = method or caps.preferred_structured_method
         if resolved == "function_calling":
             kwargs.setdefault("tool_choice", None)
         return super().with_structured_output(schema, method=method, **kwargs)
@@ -260,8 +288,11 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "kimi":       ProviderSpec(base_url="https://api.moonshot.ai/v1"),
     "groq":       ProviderSpec(base_url="https://api.groq.com/openai/v1"),
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
+    # LocalCompatibleChatOpenAI, so ollama models get json_schema structured
+    # output rather than function calling. See that class for why.
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
-                               key_optional=True, placeholder_key="ollama"),
+                               key_optional=True, placeholder_key="ollama",
+                               chat_class=LocalCompatibleChatOpenAI),
     # Generic endpoint: user supplies base_url; key optional (keyless local).
     "openai_compatible": ProviderSpec(
         require_base_url=True, key_optional=True, chat_class=LocalCompatibleChatOpenAI

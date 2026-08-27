@@ -65,14 +65,16 @@ class TestTraderPriceAnchor:
 
     def test_the_instruction_names_the_snapshot_as_the_price_source(self):
         system = _capture_prompt(_state())[0]["content"]
-        assert "verified market snapshot" in system
-        assert "from memory" in system
+        assert "verified snapshot" in system
+        assert "recall" in system
 
     def test_the_instruction_says_to_omit_rather_than_guess(self):
-        # Guessing is the failure mode; an absent level costs far less than a
-        # fabricated one, which arms a stop alert at a price that never comes.
+        # There is no longer a price field to guess into. The prompt says so,
+        # which is stronger than asking the model to abstain: a level it cannot
+        # type is one it cannot fabricate.
         system = _capture_prompt(_state())[0]["content"]
-        assert "omit the prices rather than guessing" in system
+        assert "You do NOT give prices" in system
+        assert "no field" in system
 
     def test_a_failed_snapshot_does_not_sink_the_run(self):
         # Market data can be unavailable. The trade plan degrades; the analysis

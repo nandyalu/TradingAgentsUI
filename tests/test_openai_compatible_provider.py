@@ -96,5 +96,34 @@ def test_structured_output_suppresses_object_tool_choice(monkeypatch):
     ).get_llm()
     out = llm.with_structured_output(Schema)
     assert out == "BOUND"
+    # json_schema by default: the server constrains the sampler, so a small
+    # model cannot emit a malformed answer at all. On the function-calling path
+    # it had to produce a correct tool call unaided, and one that answered in
+    # prose returned nothing to parse.
+    assert captured["method"] == "json_schema"
+
+
+@pytest.mark.unit
+def test_tool_choice_is_still_suppressed_where_json_schema_is_unavailable(monkeypatch):
+    # The #1057 fix has to survive the json_schema default. A model whose
+    # capability entry says it cannot do json_schema keeps function calling,
+    # and must still not be sent the object-form tool_choice.
+    from langchain_openai import ChatOpenAI
+    from pydantic import BaseModel
+
+    class Schema(BaseModel):
+        x: int
+
+    captured = {}
+    monkeypatch.setattr(
+        ChatOpenAI,
+        "with_structured_output",
+        lambda self, schema, method=None, **kw: captured.update({"method": method, **kw}) or "BOUND",
+    )
+    llm = create_llm_client(
+        provider="openai_compatible", model="deepseek-v4-flash",
+        base_url="http://localhost:1234/v1",
+    ).get_llm()
+    llm.with_structured_output(Schema)
     assert captured["method"] == "function_calling"
     assert captured["tool_choice"] is None  # not the object form

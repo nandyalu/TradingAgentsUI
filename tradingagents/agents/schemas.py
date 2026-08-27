@@ -159,40 +159,100 @@ class TraderProposal(BaseModel):
             "bear case. Do not default to 50 — commit to a considered estimate."
         ),
     )
-    entry_price: float | None = Field(
+    # **The model states distances, never prices.** It used to be asked for
+    # entry, stop and target in the quote currency, and a small model filled
+    # those fields from what it remembered of the ticker: $2,000 for GOOG on a
+    # day it traded at $357, $30 for VERI at $1.26. Prompting against it helped
+    # and did not stop it, because a model that can type a number can type the
+    # wrong one.
+    #
+    # A multiple cannot be a remembered price. Python turns these into levels
+    # from the verified close and ATR, so the arithmetic is checkable and the
+    # only thing the model decides is how much room to give the trade — which
+    # is the judgement worth having from it.
+    stop_atr_multiple: float | None = Field(
         default=None,
-        description="Optional entry price target in the instrument's quote currency.",
-    )
-    stop_loss: float | None = Field(
-        default=None,
-        description="Optional stop-loss price in the instrument's quote currency.",
-    )
-    target_price: float | None = Field(
-        default=None,
+        ge=0.25,
+        le=10.0,
         description=(
-            "Optional take-profit / target price in the instrument's quote "
-            "currency, used to compute the risk/reward ratio. Provide whenever "
-            "the action is Buy or Sell."
+            "How far the stop sits from the entry, counted in ATRs (average "
+            "true range). Typical swing trades use 1.5 to 3. Smaller means a "
+            "tighter stop that ordinary noise may trigger; larger risks more "
+            "per share. Give this whenever the action is Buy or Sell. Do NOT "
+            "give a price — the exact level is computed from the verified "
+            "snapshot."
         ),
     )
+    target_r_multiple: float | None = Field(
+        default=None,
+        ge=0.25,
+        le=20.0,
+        description=(
+            "How much the trade aims to make, as a multiple of what it risks. "
+            "2 means the target is twice as far from entry as the stop is, so "
+            "the risk/reward is 2:1. Give this whenever the action is Buy or "
+            "Sell. Do NOT give a price."
+        ),
+    )
+
+
     position_sizing: str | None = Field(
         default=None,
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
 
-    @field_validator("entry_price", "stop_loss", "target_price", mode="before")
+    @field_validator("stop_atr_multiple", "target_r_multiple", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
 
-def _render_trade_review(proposal: TraderProposal) -> str:
+def resolve_levels(proposal: "TraderProposal", basis: dict | None) -> dict:
+    """Turn the proposal's multiples into entry, stop and target prices.
+
+    Python owns this arithmetic so the levels cannot be recalled from training.
+    ``basis`` is ``{"close", "atr"}`` from ``verified_levels_basis`` — computed
+    from the same OHLCV the analysts read.
+
+    Returns all-``None`` when there is no basis or no multiples, which is the
+    honest answer: a plan with no levels, rather than levels nobody can defend.
+    Hold takes no levels either, since there is no trade to place them around.
+    """
+    empty = {"entry_price": None, "stop_loss": None, "target_price": None}
+    if basis is None or proposal.action is TraderAction.HOLD:
+        return empty
+    stop_mult, target_mult = proposal.stop_atr_multiple, proposal.target_r_multiple
+    if stop_mult is None or target_mult is None:
+        return empty
+
+    close, atr = basis["close"], basis["atr"]
+    risk = stop_mult * atr
+    # A stop wider than the price itself would put the level at or below zero.
+    if risk >= close:
+        return empty
+    # Direction follows the action: a long stops below and targets above, a
+    # short does the reverse. Getting this backwards would store a stop that
+    # triggers the instant it is placed, which is the failure
+    # _levels_on_the_wrong_side exists to catch downstream.
+    sign = -1.0 if proposal.action is TraderAction.BUY else 1.0
+    stop = close + sign * risk
+    target = close - sign * risk * target_mult
+    if target <= 0:
+        return empty
+    return {
+        "entry_price": round(close, 2),
+        "stop_loss": round(stop, 2),
+        "target_price": round(target, 2),
+    }
+
+
+def _render_trade_review(proposal: TraderProposal, levels: dict) -> str:
     """Probability + risk/reward + expected-value review.
 
-    The win probability comes from the model; the risk/reward ratio, expected
-    value (in R-multiples), and breakeven win-rate are computed here from the
-    entry / stop / target levels so the numbers stay arithmetically consistent
-    rather than being hallucinated by the LLM.
+    The win probability comes from the model. Everything else — the levels in
+    ``levels``, the risk/reward ratio, the expected value in R-multiples and
+    the breakeven win-rate — is computed in Python, so the numbers stay
+    arithmetically consistent and none of them can be recalled from training.
     """
     lines = ["### Probability & Risk/Reward"]
     prob = proposal.win_probability
@@ -200,12 +260,12 @@ def _render_trade_review(proposal: TraderProposal) -> str:
 
     rr = None
     if (
-        proposal.entry_price is not None
-        and proposal.stop_loss is not None
-        and proposal.target_price is not None
+        levels["entry_price"] is not None
+        and levels["stop_loss"] is not None
+        and levels["target_price"] is not None
     ):
-        reward = abs(proposal.target_price - proposal.entry_price)
-        risk = abs(proposal.entry_price - proposal.stop_loss)
+        reward = abs(levels["target_price"] - levels["entry_price"])
+        risk = abs(levels["entry_price"] - levels["stop_loss"])
         if risk > 0:
             rr = reward / risk
             lines.append(
@@ -230,7 +290,7 @@ def _render_trade_review(proposal: TraderProposal) -> str:
     return "\n".join(lines)
 
 
-def render_trader_proposal(proposal: TraderProposal) -> str:
+def render_trader_proposal(proposal: TraderProposal, levels: dict | None = None) -> str:
     """Render a TraderProposal to markdown.
 
     The trailing ``FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**`` line is
@@ -246,15 +306,19 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         "",
         f"**Bear Case**: {proposal.bear_case}",
     ]
-    if proposal.entry_price is not None:
-        parts.extend(["", f"**Entry Price**: {proposal.entry_price}"])
-    if proposal.stop_loss is not None:
-        parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
-    if proposal.target_price is not None:
-        parts.extend(["", f"**Target Price**: {proposal.target_price}"])
+    # The rendered shape is unchanged on purpose. Downstream consumers parse
+    # these lines out of the markdown, so moving who computes the number must
+    # not move where it appears.
+    levels = levels or {"entry_price": None, "stop_loss": None, "target_price": None}
+    if levels["entry_price"] is not None:
+        parts.extend(["", f"**Entry Price**: {levels['entry_price']}"])
+    if levels["stop_loss"] is not None:
+        parts.extend(["", f"**Stop Loss**: {levels['stop_loss']}"])
+    if levels["target_price"] is not None:
+        parts.extend(["", f"**Target Price**: {levels['target_price']}"])
     if proposal.position_sizing:
         parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
-    parts.extend(["", _render_trade_review(proposal)])
+    parts.extend(["", _render_trade_review(proposal, levels)])
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
