@@ -69,10 +69,26 @@ class TestResolveLevels:
 
         assert levels["stop_loss"] is None
 
-    def test_the_multiples_are_bounded_by_the_schema(self):
-        """A model that answers 500 has misunderstood the field, and a level
-        computed from it would be absurd rather than merely wrong."""
+    def test_an_implausible_multiple_costs_the_levels_and_not_the_proposal(self):
+        """A run answered 10.75 ATRs. The schema used to cap at 10, so Pydantic
+        rejected the whole proposal, the structured call fell back to free text,
+        and the reasoning and win probability went out with the one number that
+        was unusable. The bound now sits in resolve_levels instead."""
+        wide = _proposal(stop=10.75)
+
+        assert wide.stop_atr_multiple == 10.75          # the proposal survives
+        assert resolve_levels(wide, BASIS)["stop_loss"] is None   # the level does not
+
+    def test_an_implausible_target_is_refused_the_same_way(self):
+        far = _proposal(target=25.0)
+
+        assert far.target_r_multiple == 25.0
+        assert resolve_levels(far, BASIS)["target_price"] is None
+
+    def test_the_schema_still_rejects_the_wrong_kind_of_number(self):
+        """Loose is not absent. A negative or absurd multiple is not a bad plan,
+        it is the wrong kind of thing."""
         with pytest.raises(Exception):
-            _proposal(stop=500.0)
+            _proposal(stop=-1.0)
         with pytest.raises(Exception):
-            _proposal(target=0.01)
+            _proposal(target=500.0)
