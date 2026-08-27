@@ -16,12 +16,17 @@ so that:
   memory log, and saved reports keep working unchanged
 """
 
+
 from __future__ import annotations
+
+import logging
 
 from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -453,9 +458,15 @@ class SentimentReport(BaseModel):
             "Use Neutral only when all sources are genuinely silent or non-committal."
         ),
     )
+    # Bound at 100, not 10, with the out-of-range case normalised below. A
+    # tight bound rejected the whole report over this one field: models
+    # answered 52 and 48 on a 0-10 scale, reading it as a percentage, and
+    # Pydantic threw away the narrative and the band along with the number.
+    # Same shape as the trader's stop multiple — loosen the schema, put the
+    # judgement in code.
     overall_score: float = Field(
         ge=0.0,
-        le=10.0,
+        le=100.0,
         description=(
             "Numeric sentiment intensity on a 0–10 scale. "
             "0 = maximally bearish, 5 = neutral, 10 = maximally bullish. "
@@ -465,6 +476,24 @@ class SentimentReport(BaseModel):
             "Only the 0–10 bounds are enforced."
         ),
     )
+    @field_validator("overall_score", mode="after")
+    @classmethod
+    def _percentage_to_ten_point(cls, value: float) -> float:
+        """Rescale a 0-100 answer onto the 0-10 scale the field asks for.
+
+        A score above 10 is not a stronger opinion; it is the same opinion on
+        the wrong scale, and 52 on a 0-100 scale means the same thing as 5.2 on
+        a 0-10 one. Rescaling keeps the report, which carries the narrative and
+        the band as well as this number.
+        """
+        if value > 10.0:
+            logger.warning(
+                "sentiment overall_score %.0f is on a 0-100 scale; reading it as %.1f",
+                value, value / 10.0,
+            )
+            return value / 10.0
+        return value
+
     confidence: Literal["low", "medium", "high"] = Field(
         description=(
             "Confidence in the assessment based on data quality and sample size. "

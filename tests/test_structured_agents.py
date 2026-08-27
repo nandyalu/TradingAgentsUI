@@ -411,10 +411,31 @@ class TestRenderSentimentReport:
             )
             assert band.value in render_sentiment_report(report)
 
-    def test_score_out_of_range_rejected(self):
+    def test_a_percentage_score_is_rescaled_rather_than_rejected(self):
+        """Models answer this 0-10 field on a 0-100 scale — 52 and 48 were seen
+        in real runs. Rejecting threw away the narrative and the band with it,
+        and 52 out of 100 means the same as 5.2 out of 10."""
+        report = SentimentReport(
+            overall_band=SentimentBand.BULLISH, overall_score=52.0,
+            confidence="high", narrative="n",
+        )
+
+        assert report.overall_score == pytest.approx(5.2)
+
+    def test_a_score_already_in_range_is_left_alone(self):
+        report = SentimentReport(
+            overall_band=SentimentBand.BULLISH, overall_score=8.5,
+            confidence="high", narrative="n",
+        )
+
+        assert report.overall_score == pytest.approx(8.5)
+
+    def test_a_score_beyond_any_scale_is_still_rejected(self):
+        """Loose is not absent. 250 is not a percentage misread, it is the
+        wrong kind of number."""
         with pytest.raises(ValidationError):
             SentimentReport(
-                overall_band=SentimentBand.BULLISH, overall_score=11.0,
+                overall_band=SentimentBand.BULLISH, overall_score=250.0,
                 confidence="high", narrative="n",
             )
 
