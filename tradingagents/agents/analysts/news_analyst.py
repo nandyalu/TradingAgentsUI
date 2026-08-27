@@ -1,5 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from tradingagents.agents.utils.tool_call_recovery import (
+    invoke_with_tool_call_recovery,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_global_news,
     get_instrument_context_from_state,
@@ -54,7 +57,9 @@ def create_news_analyst(llm):
         prompt = prompt.partial(instrument_context=instrument_context)
 
         chain = prompt | llm.bind_tools(tools)
-        result = chain.invoke(state["messages"])
+        result = invoke_with_tool_call_recovery(
+            chain, state["messages"], [t.name for t in tools], "News Analyst",
+        )
 
         report = ""
 
