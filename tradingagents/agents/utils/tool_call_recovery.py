@@ -34,17 +34,13 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Added to every analyst's preamble. The failure this addresses is not a
-# capability problem: given "Get me AAPL's price data from 2026-07-27 to
-# 2026-08-27" the same model made a correct call every time, and given "think
-# aloud about your plan first, in detail, before doing anything" it narrated
-# every time. The prompt decides it, so the prompt says so plainly.
-CALL_DO_NOT_DESCRIBE = (
-    " Call the tools. Do not write out a plan first, and do not describe the"
-    " call you are about to make: a tool call written as text is not a tool"
-    " call, the data never arrives, and your description becomes the report."
-    " Fetch first, then write the report from what comes back."
-)
+# **A prompt instruction was tried here and did not work.** "Call the tools. Do
+# not write out a plan first, and do not describe the call you are about to
+# make" was added to every analyst preamble and measured against the prompt
+# that reproduces the failure: 13 of 17 runs made a real call without it and 13
+# of 17 with it. Identical. It was reverted rather than left in, because it
+# costs about fifty tokens on every analyst turn of every analysis and bought
+# nothing. Do not re-add it without a measurement that beats 13 of 17.
 
 # A fenced block, or the literal key an OpenAI-shaped call would use. Either on
 # its own is weak evidence; paired with a bound tool's name it is not.

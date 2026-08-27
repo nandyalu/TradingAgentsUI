@@ -1,7 +1,6 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from tradingagents.agents.utils.tool_call_recovery import (
-    CALL_DO_NOT_DESCRIBE,
     invoke_with_tool_call_recovery,
 )
 from tradingagents.agents.utils.agent_utils import (
@@ -72,8 +71,6 @@ Write a very detailed and nuanced report of the trends you observe. Provide spec
                     " If you or any other assistant has the FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** or deliverable,"
                     " prefix your response with FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL** so the team knows to stop."
                     " You have access to the following tools: {tool_names}."
-                    + CALL_DO_NOT_DESCRIBE +
-                    
                     " Today's date is {current_date}; treat it as 'now' for all analysis and tool-call date ranges. {instrument_context}\n"
                     "{system_message}",
                 ),
