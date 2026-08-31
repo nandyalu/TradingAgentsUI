@@ -55,9 +55,13 @@ def create_fundamentals_analyst(llm):
                     "system",
                     "You are a helpful AI assistant, collaborating with other assistants."
                     " Report what the data supports; another agent decides the trade."
-                    " Today's date is {current_date}; treat it as 'now' for all analysis. {instrument_context}"
                     " " + NO_EXTERNAL_TOOLS +
-                    "\n{system_message}",
+                    "\n{system_message}\n"
+                    # Volatile per-run values (trade date, instrument) go LAST
+                    # so the static prefix above stays byte-identical across
+                    # trade dates and tickers, and provider prompt caches can
+                    # reuse it between runs (#750).
+                    " Today's date is {current_date}; treat it as 'now' for all analysis. {instrument_context}",
                 ),
                 MessagesPlaceholder(variable_name="messages"),
             ]

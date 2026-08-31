@@ -57,9 +57,13 @@ def create_news_analyst(llm, google_search_grounding: bool = False):
                     " If you are unable to fully answer, that's OK; another assistant with different tools"
                     " will help where you left off. Execute what you can to make progress."
                     " Report what your tools support; another agent decides the trade."
-                    " You have access to the following tools: {tool_names}."
-                    " Today's date is {current_date}; treat it as 'now' for all analysis and tool-call date ranges. {instrument_context}\n"
-                    "{system_message}",
+                    " You have access to the following tools: {tool_names}.\n"
+                    "{system_message}\n"
+                    # Volatile per-run values (trade date, instrument) go LAST
+                    # so the static prefix above stays byte-identical across
+                    # trade dates and tickers, and provider prompt caches can
+                    # reuse it between runs (#750).
+                    " Today's date is {current_date}; treat it as 'now' for all analysis and tool-call date ranges. {instrument_context}",
                 ),
                 MessagesPlaceholder(variable_name="messages"),
             ]
