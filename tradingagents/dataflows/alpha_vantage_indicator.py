@@ -1,4 +1,5 @@
 from .alpha_vantage_common import AlphaVantageNotConfiguredError, _make_api_request
+from tradingagents.dataflows.errors import BadVendorArgumentError
 
 
 def get_indicator(
@@ -60,8 +61,11 @@ def get_indicator(
     }
 
     if indicator not in supported_indicators:
-        raise ValueError(
-            f"Indicator {indicator} is not supported. Please choose from: {list(supported_indicators.keys())}"
+        # See y_finance.py for why this is not a plain ValueError.
+        raise BadVendorArgumentError(
+            f"Indicator {indicator} is not supported. "
+            f"Please choose from: {list(supported_indicators.keys())}",
+            valid=list(supported_indicators.keys()),
         )
 
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
