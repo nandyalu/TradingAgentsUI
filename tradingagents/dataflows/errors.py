@@ -8,7 +8,8 @@ these (or a thin vendor-named subclass) and needs no new ``except`` clause.
     VendorError
     ├── NoMarketDataError          no usable rows (empty result OR stale data)
     ├── VendorRateLimitError       transient throttle -> skip to next vendor
-    └── VendorNotConfiguredError   missing API key/config -> vendor unavailable
+    ├── VendorNotConfiguredError   missing API key/config -> vendor unavailable
+    └── BadVendorArgumentError     the *caller* asked for something invalid
 
 The number of types is the number of distinct router reactions, not the number
 of human-describable causes: empty and stale data get identical handling, so
@@ -53,3 +54,36 @@ class VendorNotConfiguredError(VendorError, ValueError):
     Also a ``ValueError`` so existing callers that catch ``ValueError`` keep
     working while the routing layer can treat it as "vendor unavailable".
     """
+
+
+class BadVendorArgumentError(VendorError, ValueError):
+    """The caller asked for something that does not exist.
+
+    **The vendor is healthy. The request was wrong.** That distinction is the
+    whole reason this type exists, and it changes three things in the router:
+
+    1. **It does not trip the circuit breaker.** The breaker exists to skip a
+       vendor that is *down*, and its own docstring says only transient errors
+       should open it. Counting a bad argument as vendor ill-health poisons a
+       working vendor for every later call.
+    2. **It does not fall through to the next vendor.** Every vendor will
+       reject the same invalid argument, so trying them in turn only wastes
+       requests and buries the message that explains the problem.
+    3. **It reaches the model.** These messages name the valid values, so an
+       agent shown one can retry correctly. Swallowing it into "no vendor
+       available" throws away the answer.
+
+    This was not hypothetical. On 2026-09-02 a model asked for an indicator
+    called ``macd_histogram`` — the real name is ``macdh``. It made five such
+    requests, tripped yfinance's breaker at the third, and every subsequent
+    indicator call for the next five minutes failed with "No available vendor",
+    **including the valid ones**. Two complete forty-minute analyses were lost
+    to a typo whose correction was in the first error message.
+
+    ``valid`` carries the accepted values where the vendor knows them, so a
+    caller can render them without parsing the message.
+    """
+
+    def __init__(self, message: str, valid: list[str] | None = None):
+        self.valid = list(valid or [])
+        super().__init__(message)

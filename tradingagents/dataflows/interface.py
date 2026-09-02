@@ -1,6 +1,7 @@
 import logging
 import time
 from typing import Any
+from tradingagents.dataflows.errors import BadVendorArgumentError
 
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
@@ -320,6 +321,17 @@ def route_to_vendor(method: str, *args, **kwargs):
             result = _try_vendor(vendor, method, args, kwargs)
             _circuit_breaker.record_success(vendor)
             return result
+        except BadVendorArgumentError:
+            # The caller asked for something that does not exist. The vendor is
+            # healthy, so this must not touch the circuit breaker — and every
+            # other vendor will reject the same argument, so falling through
+            # only wastes requests and buries the message that says what the
+            # valid values are.
+            #
+            # Raised straight up so it reaches the agent, which can read the
+            # valid list and ask again. See BadVendorArgumentError's docstring
+            # for the two analyses this cost before it was separated out.
+            raise
         except VendorRateLimitError:
             logger.warning("Vendor %r rate-limited for %s; trying next.", vendor, method)
             _circuit_breaker.record_failure(vendor)
