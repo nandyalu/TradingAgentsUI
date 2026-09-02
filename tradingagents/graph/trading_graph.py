@@ -62,6 +62,30 @@ def _coerce_max_retries(value):
     return n
 
 
+def _return_error_to_the_model(exc: Exception) -> str:
+    """What a tool node hands back when a tool raises.
+
+    **A tool error is a message to the model, not the end of the analysis.**
+    By default a raising tool kills the graph, and on 2026-09-02 that discarded
+    two complete forty-minute analyses: the model had asked for an indicator
+    called ``macd_histogram`` when the real name is ``macdh``, and the error
+    naming every valid indicator went to the logs instead of to the model that
+    could have acted on it.
+
+    Handing the message back is how a tool-calling model is meant to recover.
+    It reads what went wrong and calls again, which is one extra call against
+    an analysis of about twenty.
+
+    **Only the message, and never a suggestion of what to do instead.** A model
+    told "that failed, try something else" invents a plausible substitute, and
+    an invented answer that reads as data is the exact failure that
+    disqualified four models in August. The vendor's own message already names
+    the valid values where they exist; anything beyond it is us guessing.
+    """
+    return f"TOOL ERROR: {type(exc).__name__}: {exc}"
+
+
+
 class TradingAgentsGraph:
     """Main class that orchestrates the trading agents framework."""
 
@@ -192,7 +216,12 @@ class TradingAgentsGraph:
         return kwargs
 
     def _create_tool_nodes(self) -> dict[str, ToolNode]:
-        """Create tool nodes for different data sources using abstract methods."""
+        """Create tool nodes for different data sources using abstract methods.
+
+        Every node sets ``handle_tool_errors``. Without it a raising tool ends
+        the whole analysis; with it the model is told what went wrong and gets
+        to call again. See ``_return_error_to_the_model``.
+        """
         return {
             "market": ToolNode(
                 [
@@ -204,13 +233,15 @@ class TradingAgentsGraph:
                     # LLM and required by its prompt; must be executable here or
                     # the call fails and the model reports it "unavailable").
                     get_verified_market_snapshot,
-                ]
+                ],
+                handle_tool_errors=_return_error_to_the_model,
             ),
             "social": ToolNode(
                 [
                     # News tools for social media analysis
                     get_news,
-                ]
+                ],
+                handle_tool_errors=_return_error_to_the_model,
             ),
             "news": ToolNode(
                 [
@@ -220,7 +251,8 @@ class TradingAgentsGraph:
                     get_insider_transactions,
                     get_macro_indicators,
                     get_prediction_markets,
-                ]
+                ],
+                handle_tool_errors=_return_error_to_the_model,
             ),
             "fundamentals": ToolNode(
                 [
@@ -229,7 +261,8 @@ class TradingAgentsGraph:
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
-                ]
+                ],
+                handle_tool_errors=_return_error_to_the_model,
             ),
         }
 
