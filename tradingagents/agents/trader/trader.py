@@ -42,7 +42,11 @@ def create_trader(llm):
         # grounded in real ATR / support-resistance / current price (#1167). The
         # report is empty when the user did not select the market analyst, so
         # only offer it (and the grounding instruction) when it has content.
-        market_report = (state["market_report"] or "").strip()
+        #
+        # `.get`, not `[...]`: the key is absent rather than empty on a state
+        # built without the market analyst, which is the case the comment above
+        # describes. Subscripting raised there.
+        market_report = (state.get("market_report") or "").strip()
 
         if market_report:
             grounding = (
