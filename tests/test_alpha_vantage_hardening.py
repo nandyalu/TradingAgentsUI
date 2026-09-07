@@ -3,7 +3,8 @@
 Regressions for #990 (no request timeout -> can hang), #991 (invalid-key
 responses mislabeled as rate limits and silently treated as transient), and
 #1115 (fundamentals look-ahead filter never ran because the payload is a JSON
-string, not a dict).
+string, not a dict), and the date trim that keeps post-end_date bars out of a
+historical run.
 """
 import json
 
