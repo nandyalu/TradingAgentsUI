@@ -250,13 +250,24 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     # Filter to curr_date to prevent look-ahead bias in backtesting.
     data = data[data["Date"] <= curr_date_dt]
 
-    # Guard the latest in-range bar before dropping incomplete rows: a newest bar
-    # with no close is "not settled yet", not "does not exist". Silently dropping
-    # it would make the previous trading day look like the latest (#1201); raise
-    # instead so the router surfaces it rather than fabricating a fallback.
+    # A newest bar with no close is usually an unsettled session — mid-session,
+    # a holiday, or a thinly traded instrument — not a symbol without data.
+    # _fill_price_gaps below drops it, here and mid-series alike, so the frame
+    # ends at the last settled bar rather than carrying a fabricated close
+    # (#1201). Refusing the whole frame instead reported a tradable symbol as
+    # invalid or delisted (#1289), so only a range with no close anywhere is
+    # treated as no data; the staleness check decides whether what remains is
+    # recent enough for curr_date.
     if not data.empty and pd.isna(data["Close"].iloc[-1]):
-        raise NoMarketDataError(
-            symbol, canonical, "latest in-range OHLCV bar has no closing price"
+        settled = data["Close"].notna().to_numpy().nonzero()[0]
+        if settled.size == 0:
+            raise NoMarketDataError(
+                symbol, canonical, "no bar in range has a closing price"
+            )
+        logger.warning(
+            "%s: %d trailing bar(s) through %s have no closing price; using %s "
+            "as the latest close.", canonical, len(data) - settled[-1] - 1,
+            data["Date"].iloc[-1].date(), data["Date"].iloc[settled[-1]].date(),
         )
 
     data = _fill_price_gaps(data)
