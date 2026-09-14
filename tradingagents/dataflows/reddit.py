@@ -42,12 +42,12 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .date_window import in_window
+from .date_window import coverage_gap, in_window
 from .symbol_utils import crypto_base
 
 logger = logging.getLogger(__name__)
@@ -63,13 +63,20 @@ def _within_window(posts, start_date, end_date):
         return posts
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-    kept = []
-    for p in posts:
-        ts = p.get("created_utc")
-        created = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
-        if in_window(created, start_dt, end_dt):
-            kept.append(p)
-    return kept
+    return [p for p in posts if in_window(_posted_at(p), start_dt, end_dt)]
+
+
+def _posted_at(post) -> datetime | None:
+    """A post's ``created_utc`` epoch as a UTC datetime, or None when missing."""
+    ts = post.get("created_utc")
+    return datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
+
+
+def _coverage_dates(posts) -> list:
+    """Post dates plus the search lookback start: the query is limited to the
+    last week (``t=week``), so a window older than that is out of reach even
+    when the feed returns nothing."""
+    return [_posted_at(p) for p in posts] + [datetime.now(timezone.utc) - _SEARCH_LOOKBACK]
 
 _API = "https://www.reddit.com/r/{sub}/search.json?{qs}"
 _OAUTH_API = "https://oauth.reddit.com/r/{sub}/search.json?{qs}"
@@ -143,6 +150,9 @@ def _get_oauth_token() -> str | None:
         logger.warning("Reddit OAuth token request failed: %s", exc)
 
     return None
+
+
+_SEARCH_LOOKBACK = timedelta(days=7)  # matches t=week below
 
 
 def _search_qs(ticker: str, limit: int) -> str:
@@ -569,6 +579,7 @@ def fetch_reddit_posts(
     blocks = []
     total_posts = 0
     unavailable = []
+    fetched_posts = []
 
     if _trawl_url():
         with ThreadPoolExecutor(max_workers=len(subreddits)) as pool:
@@ -601,8 +612,14 @@ def fetch_reddit_posts(
             continue
         posts = _within_window(fetched, start_date, end_date)
         total_posts += len(posts)
+        fetched_posts.extend(fetched)
         if not posts:
-            blocks.append(f"r/{sub}: <no posts found mentioning {ticker.upper()} in the past 7 days>")
+            gap = start_date and end_date and coverage_gap(
+                _coverage_dates(fetched), start_date, end_date,
+                f"r/{sub}", f"discussion of {ticker.upper()}",
+            )
+            period = f"within {start_date}..{end_date}" if start_date and end_date else "in the past 7 days"
+            blocks.append(f"r/{sub}: {gap or f'<no posts found mentioning {ticker.upper()} {period}>'}")
             continue
 
         via_rss = any(p.get("source") == "rss" for p in posts)
@@ -641,9 +658,14 @@ def fetch_reddit_posts(
                 f"({', '.join(f'r/{s}' for s in unavailable)}); this is not an "
                 f"absence of discussion>"
             )
-        summary = (
+        gap = start_date and end_date and coverage_gap(
+            _coverage_dates(fetched_posts), start_date, end_date,
+            "Reddit search", f"discussion of {ticker.upper()}",
+        )
+        period = f"within {start_date}..{end_date}" if start_date and end_date else "in the past 7 days"
+        summary = gap or (
             f"<no Reddit posts found mentioning {ticker.upper()} across "
-            f"{', '.join(f'r/{s}' for s in searched)} in the past 7 days>"
+            f"{', '.join(f'r/{s}' for s in searched)} {period}>"
         )
         if unavailable:
             summary += (
