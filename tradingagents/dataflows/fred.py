@@ -14,9 +14,9 @@ import re
 from datetime import datetime, timedelta
 
 import pytz
-import requests
 
 from .errors import VendorNotConfiguredError
+from .utils import get_scrubbed
 
 logger = logging.getLogger(__name__)
 
@@ -133,9 +133,8 @@ def _fred_today() -> str:
     return datetime.now(FRED_TZ).strftime("%Y-%m-%d")
 
 
-# The API key travels as a query parameter, so requests' own HTTPError message
-# — which quotes the full URL — would print it into any log or traceback that
-# catches it. Scrub it on the way out.
+# A request error is scrubbed by get_scrubbed. FRED also quotes the URL in the
+# JSON body of a 400, which no request helper sees, so the pattern stays here.
 _API_KEY_IN_URL = re.compile(r"(api_key=)[^&\s]+")
 
 
@@ -146,16 +145,14 @@ def redact(text: str) -> str:
 
 def _request(path: str, params: dict) -> dict:
     """GET a FRED endpoint, surfacing FRED's JSON error body on a bad request."""
-    api_params = {**params, "api_key": get_api_key(), "file_type": "json"}
-    try:
-        response = requests.get(
-            f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT
-        )
-    except requests.RequestException as exc:
-        # A connection error or a timeout also quotes the full URL.
-        raise type(exc)(
-            redact(exc), request=exc.request, response=exc.response
-        ) from None
+    api_key = get_api_key()
+    response = get_scrubbed(
+        f"{FRED_API_BASE}/{path}",
+        params={**params, "api_key": api_key, "file_type": "json"},
+        timeout=REQUEST_TIMEOUT,
+        secret=api_key,
+        passthrough=(400,),
+    )
     # FRED returns 400 with a JSON {"error_message": ...} for unknown series IDs
     # or malformed params; turn that into a clear, actionable error.
     if response.status_code == 400:
@@ -164,12 +161,6 @@ def _request(path: str, params: dict) -> dict:
         except ValueError:
             message = response.text
         raise ValueError(f"FRED request failed: {redact(message)}")
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        # Re-raise the same class so callers matching on HTTPError still work,
-        # and keep the response attached for status-code-based retry logic.
-        raise requests.HTTPError(redact(exc), response=response) from None
     return response.json()
 
 
