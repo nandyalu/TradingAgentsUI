@@ -231,6 +231,20 @@ class FredKeyRedactionTests(unittest.TestCase):
         self.assertNotIn("abcdef0123456789abcdef0123456789", str(caught.exception))
         self.assertIn("api_key=REDACTED", str(caught.exception))
 
+    def test_connection_error_message_carries_no_key(self):
+        """A connection error or a timeout quotes the full URL too."""
+        error = requests.ConnectionError(
+            "HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries"
+            " exceeded with url: /fred/series?series_id=DGS10"
+            "&api_key=abcdef0123456789abcdef0123456789&file_type=json"
+        )
+        with mock.patch.dict("os.environ", {"FRED_API_KEY": "abcdef0123456789abcdef0123456789"}):
+            with mock.patch("requests.get", side_effect=error):
+                with self.assertRaises(requests.ConnectionError) as caught:
+                    fred._request("series", {"series_id": "DGS10"})
+        self.assertNotIn("abcdef0123456789abcdef0123456789", str(caught.exception))
+        self.assertIn("api_key=REDACTED", str(caught.exception))
+
     def test_http_error_keeps_its_class_and_response(self):
         """Callers matching on HTTPError, or reading the status code, still work."""
         response = mock.Mock(status_code=503)
