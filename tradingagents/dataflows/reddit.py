@@ -1,6 +1,6 @@
 """Reddit search fetcher for ticker-specific discussion posts.
 
-Supports two modes:
+Supports three modes:
 
 1. **OAuth (preferred)**: When ``REDDIT_CLIENT_ID`` and ``REDDIT_CLIENT_SECRET``
    env vars are set, uses Reddit's OAuth2 app-only flow to hit
@@ -20,6 +20,11 @@ Supports two modes:
 
 On a 429 we back off once (honouring ``Retry-After``).
 
+Every mode searches all the subreddits in one combined request (``r/a+b+c``),
+because anonymous RSS allows about one request per minute per IP and a
+request per subreddit spent a back-off on almost every run. Each entry
+names its subreddit, and posts are grouped back by it.
+
 A fetch that fails is reported as ``<unavailable>``, never as "no posts found":
 the two are different claims, and passing a rate-limited fetch off as silence
 hands the sentiment analyst a signal that was never observed (#1295).
@@ -33,7 +38,6 @@ from __future__ import annotations
 
 import html
 import http.client
-import json
 import logging
 import os
 import random
@@ -41,7 +45,6 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -73,10 +76,14 @@ def _posted_at(post) -> datetime | None:
 
 
 def _coverage_dates(posts) -> list:
-    """Post dates plus the search lookback start: the query is limited to the
-    last week (``t=week``), so a window older than that is out of reach even
-    when the feed returns nothing."""
-    return [_posted_at(p) for p in posts] + [datetime.now(timezone.utc) - _SEARCH_LOOKBACK]
+    """Dates that bound the feed's coverage. The search is limited to the last
+    week (``t=week``), so the lookback start bounds it even when nothing came
+    back; a full page may have cut older matches off, so then only the posts
+    themselves do."""
+    dates = [_posted_at(p) for p in posts]
+    if len(posts) < _FEED_PAGE:
+        dates.append(datetime.now(timezone.utc) - _SEARCH_LOOKBACK)
+    return dates
 
 _API = "https://www.reddit.com/r/{sub}/search.json?{qs}"
 _OAUTH_API = "https://oauth.reddit.com/r/{sub}/search.json?{qs}"
@@ -150,6 +157,11 @@ def _get_oauth_token() -> str | None:
         logger.warning("Reddit OAuth token request failed: %s", exc)
 
     return None
+
+# Reddit's maximum page size. A week of posts for a ticker across the default
+# subreddits fits comfortably (a busy symbol measured 12), so one full page keeps
+# a high-volume subreddit from crowding the others out of a combined search.
+_FEED_PAGE = 100
 
 
 _SEARCH_LOOKBACK = timedelta(days=7)  # matches t=week below
@@ -244,8 +256,7 @@ def _fetch_subreddit_rss(
 ) -> list[dict] | None:
     """Default path: parse the public Atom search feed for a subreddit.
 
-    Carries no score / comment counts, so those fields are left None and the
-    post is tagged ``source="rss"`` for honest display. On a 429 (Reddit's
+    ``sub`` may be one subreddit or several joined with ``+``. On a 429 (Reddit's
     per-IP rate limit) we back off once — honouring ``Retry-After`` when
     present — before giving up, so a transient burst doesn't blank the feed.
 
@@ -284,15 +295,17 @@ def _fetch_subreddit_rss(
         title_el = entry.find("atom:title", _ATOM_NS)
         published_el = entry.find("atom:published", _ATOM_NS)
         content_el = entry.find("atom:content", _ATOM_NS)
+        category_el = entry.find("atom:category", _ATOM_NS)
         posts.append({
             "title": (title_el.text if title_el is not None else "") or "",
-            "score": None,
-            "num_comments": None,
             "created_utc": _iso_to_timestamp(
                 published_el.text if published_el is not None else None
             ),
             "selftext": _strip_html(content_el.text if content_el is not None else ""),
-            "source": "rss",
+            # A combined feed names each entry's subreddit; a single-subreddit
+            # feed may omit it, and then it can only be that one.
+            "subreddit": category_el.get("term") if category_el is not None
+            else (sub if "+" not in sub else ""),
         })
     return posts
 
@@ -391,6 +404,9 @@ _ARIA_LABEL = re.compile(r'\baria-label="([^"]*)"')
 _TIMEAGO_TS = re.compile(r'<faceplate-timeago\b[^>]*\bts="([^"]*)"')
 _NUMBER = re.compile(r'<faceplate-number\b[^>]*\bnumber="(-?\d+)"')
 _PRE = re.compile(r"<pre\b[^>]*>(.*?)</pre>", re.S)
+# A combined search (r/a+b+c) returns posts from every subreddit named, and
+# the HTML carries the name only inside each post's own link.
+_SUB_IN_PERMALINK = re.compile(r"/r/([^/]+)/")
 
 
 def _trawl_url() -> str | None:
@@ -455,13 +471,16 @@ def _parse_search_page(page: str, limit: int | None = None) -> list[dict] | None
         numbers = _NUMBER.findall(block, row) if row >= 0 else []
         # Reddit hides the score of some new posts. Show no counts then, not zeros.
         score, comments = (int(numbers[0]), int(numbers[1])) if len(numbers) >= 2 else (None, None)
+        permalink = html.unescape(href.group(1))
+        named = _SUB_IN_PERMALINK.search(permalink)
         posts.append({
             "title": html.unescape(label.group(1)),
+            "subreddit": named.group(1) if named else None,
             "score": score,
             "num_comments": comments,
             "created_utc": created,
             "selftext": "",
-            "permalink": html.unescape(href.group(1)),
+            "permalink": permalink,
             "source": "trawl",
         })
         if limit is not None and len(posts) >= limit:
@@ -547,26 +566,24 @@ def _fetch_subreddit(
 def fetch_reddit_posts(
     ticker: str,
     subreddits: Iterable[str] = DEFAULT_SUBREDDITS,
+    *,
     limit_per_sub: int = 5,
     timeout: float = 10.0,
-    inter_request_delay: float = 1.0,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> str:
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
-    ``inter_request_delay`` paces the RSS-only per-subreddit requests to stay
-    under Reddit's public per-IP rate limit; combined with the RSS-first path
-    it makes 429s rare even when several analyses run back-to-back.
+    All subreddits are searched in one combined feed (``r/a+b+c``): anonymous
+    RSS allows about one request per minute per IP, so a request per subreddit
+    spent a back-off on almost every run. Each entry names its subreddit, and
+    posts are grouped back by it.
 
-    With ``REDDIT_TRAWL_URL`` set, subreddits are fetched at once instead of
-    one after another. trawl's per-IP rate limit does not apply the same way
-    to a real browser session, and each subreddit is an independent trawl
-    session anyway, so there is nothing to pace between them. Measured
-    2026-09-15 on 3 subreddits: 39.6s one after another against 15.2s at
-    once, no fetch failures. See ``market-data.md`` for the trawl setup
-    this assumes.
+    The combined request goes through the same OAuth, trawl and RSS order as
+    a single-subreddit one. It replaced a per-subreddit fetch that trawl ran
+    in parallel; one request is fewer than three however they are paced. See
+    ``market-data.md`` for the trawl setup this assumes.
 
     When ``start_date``/``end_date`` (yyyy-mm-dd) are given, posts are trimmed to
     that window so a historical run does not leak current discussion into a
@@ -576,69 +593,50 @@ def fetch_reddit_posts(
     # ("BTC") so the query actually matches discussion instead of near-nothing.
     ticker = crypto_base(ticker) or ticker
     subreddits = list(subreddits)
+    label = ", ".join(f"r/{s}" for s in subreddits)
+    fetched = _fetch_subreddit(ticker, "+".join(subreddits), _FEED_PAGE, timeout)
+    if fetched is None:
+        return f"<Reddit unavailable: fetch failed ({label}); this is not an absence of discussion>"
+
+    window = bool(start_date and end_date)
+    posts = _within_window(fetched, start_date, end_date)
+    if not posts:
+        gap = window and coverage_gap(
+            _coverage_dates(fetched), start_date, end_date,
+            "Reddit search", f"discussion of {ticker.upper()}",
+        )
+        period = f"within {start_date}..{end_date}" if window else "in the past 7 days"
+        return gap or f"<no Reddit posts found mentioning {ticker.upper()} across {label} {period}>"
+
+    # Group by the subreddit each entry names, in the requested order. Nothing
+    # is dropped: an unlabelled post from a one-subreddit request belongs to it,
+    # and any other name gets its own block.
+    by_sub = {s.lower(): (s, []) for s in subreddits}
+    for p in posts:
+        name = p.get("subreddit") or (subreddits[0] if len(subreddits) == 1 else "unknown")
+        by_sub.setdefault(name.lower(), (name, []))[1].append(p)
+
+    page_full = len(fetched) >= _FEED_PAGE
     blocks = []
-    total_posts = 0
-    unavailable = []
-    fetched_posts = []
-
-    if _trawl_url():
-        with ThreadPoolExecutor(max_workers=len(subreddits)) as pool:
-            fetched_by_sub = dict(zip(
-                subreddits,
-                pool.map(lambda sub: _fetch_subreddit(ticker, sub, limit_per_sub, timeout), subreddits),
-            ))
-    else:
-        fetched_by_sub = {}
-        allow_retry = True
-        for i, sub in enumerate(subreddits):
-            if i > 0 and inter_request_delay:
-                time.sleep(_jitter(inter_request_delay))
-            fetched = _fetch_subreddit(ticker, sub, limit_per_sub, timeout, _retry=allow_retry)
-            if fetched is None:
-                # One failure means the per-IP budget is likely gone, so skip
-                # the (now 60s) back-off on the remaining subreddits rather
-                # than stalling the run on retries that cannot succeed;
-                # #1286 tracks coordinating this properly.
-                allow_retry = False
-            fetched_by_sub[sub] = fetched
-
-    for sub in subreddits:
-        fetched = fetched_by_sub[sub]
-        if fetched is None:
-            # A failed fetch is not an absence of discussion, so it must not be
-            # rendered as "no posts found" (#1295).
-            unavailable.append(sub)
-            blocks.append(f"r/{sub}: <unavailable: fetch failed, not an absence of posts>")
-            continue
-        posts = _within_window(fetched, start_date, end_date)
-        total_posts += len(posts)
-        fetched_posts.extend(fetched)
-        if not posts:
-            gap = start_date and end_date and coverage_gap(
-                _coverage_dates(fetched), start_date, end_date,
-                f"r/{sub}", f"discussion of {ticker.upper()}",
+    for sub, sub_posts in by_sub.values():
+        if not sub_posts:
+            blocks.append(
+                f"r/{sub}: <not among the newest {_FEED_PAGE} matches across {label}>"
+                if page_full else f"r/{sub}: <no posts found mentioning {ticker.upper()}>"
             )
-            period = f"within {start_date}..{end_date}" if start_date and end_date else "in the past 7 days"
-            blocks.append(f"r/{sub}: {gap or f'<no posts found mentioning {ticker.upper()} {period}>'}")
             continue
-
-        via_rss = any(p.get("source") == "rss" for p in posts)
-        header = f"r/{sub} — {len(posts)} recent posts mentioning {ticker.upper()}"
-        header += " (via RSS feed; scores/comments unavailable):" if via_rss else ":"
-        lines = [header]
-        for p in posts:
+        sub_posts = sub_posts[:limit_per_sub]  # the feed is newest-first
+        lines = [f"r/{sub} — {len(sub_posts)} recent posts mentioning {ticker.upper()}:"]
+        for p in sub_posts:
             title = (p.get("title") or "").replace("\n", " ").strip()
-            score = p.get("score")
-            comments = p.get("num_comments")
             created = p.get("created_utc")
-            created_str = (
-                time.strftime("%Y-%m-%d", time.gmtime(created)) if created else "?"
-            )
-            # Score / comment counts are absent on the RSS fallback path —
-            # show them only when present rather than printing fake zeros.
-            meta = created_str
-            if score is not None and comments is not None:
-                meta += f" · {score:>4}↑ · {comments:>3}c"
+            created_str = time.strftime("%Y-%m-%d", time.gmtime(created)) if created else "?"
+            # Score and comment counts come from the OAuth and trawl paths
+            # only. The RSS feed carries neither, so printing a zero there
+            # would report silence the feed never measured.
+            score, comments = p.get("score"), p.get("num_comments")
+            meta = created_str + (f" · {score:>4}↑ · {comments:>3}c"
+                                  if score is not None and comments is not None else "")
             selftext = (p.get("selftext") or "").replace("\n", " ").strip()
             if len(selftext) > 240:
                 selftext = selftext[:240] + "…"
@@ -647,30 +645,4 @@ def fetch_reddit_posts(
                 + (f"\n    body excerpt: {selftext}" if selftext else "")
             )
         blocks.append("\n".join(lines))
-
-    if total_posts == 0:
-        searched = [s for s in subreddits if s not in unavailable]
-        if not searched:
-            # Every source failed: claiming "no posts" here would assert a
-            # silence we never observed.
-            return (
-                f"<Reddit unavailable: every source failed to fetch "
-                f"({', '.join(f'r/{s}' for s in unavailable)}); this is not an "
-                f"absence of discussion>"
-            )
-        gap = start_date and end_date and coverage_gap(
-            _coverage_dates(fetched_posts), start_date, end_date,
-            "Reddit search", f"discussion of {ticker.upper()}",
-        )
-        period = f"within {start_date}..{end_date}" if start_date and end_date else "in the past 7 days"
-        summary = gap or (
-            f"<no Reddit posts found mentioning {ticker.upper()} across "
-            f"{', '.join(f'r/{s}' for s in searched)} {period}>"
-        )
-        if unavailable:
-            summary += (
-                f"\n<unavailable (fetch failed): "
-                f"{', '.join(f'r/{s}' for s in unavailable)}>"
-            )
-        return summary
     return "\n\n".join(blocks)

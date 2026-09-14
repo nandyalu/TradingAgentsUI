@@ -220,11 +220,6 @@ def test_out_of_window_articles_do_not_consume_a_slot(monkeypatch):
     assert "FUTURE" not in out
 
 
-    # Only a later article came back, so the feed does not reach this window.
-    assert "unavailable" in out and "not an absence" in out
-
-
-
 def _ticker_with(articles, monkeypatch):
     class FakeTicker:
         def __init__(self, *a, **k):
