@@ -7,7 +7,13 @@ Supports two modes:
    ``oauth.reddit.com/r/{sub}/search.json`` — gives 100 QPM, score/comment
    counts, and avoids the WAF 403 that blocks unauthenticated JSON requests.
 
-2. **RSS fallback**: When OAuth credentials are absent, falls back to the
+2. **trawl**: When ``REDDIT_TRAWL_URL`` is set, loads Reddit's HTML search page
+   in a self-hosted trawl browser (``POST {REDDIT_TRAWL_URL}/scrape``). That
+   page loads where the RSS feed returns 429, and it carries score and comment
+   counts. It has no post bodies, so each post shown gets its body from the
+   post's own JSON. A trawl failure falls back to RSS.
+
+3. **RSS fallback**: When neither is configured, falls back to the
    public Atom/RSS search feed (``reddit.com/r/{sub}/search.rss``). Subject
    to aggressive per-IP rate limiting (~1 QPM as of June 2026). RSS lacks
    score/comment counts.
@@ -67,6 +73,7 @@ def _within_window(posts, start_date, end_date):
 _API = "https://www.reddit.com/r/{sub}/search.json?{qs}"
 _OAUTH_API = "https://oauth.reddit.com/r/{sub}/search.json?{qs}"
 _RSS = "https://www.reddit.com/r/{sub}/search.rss?{qs}"
+_SEARCH_PAGE = "https://www.reddit.com/r/{sub}/search/?{qs}"
 # A descriptive, identified User-Agent (per Reddit's API etiquette). Reddit
 # blocks generic/anonymous tokens like bare "Mozilla/5.0" or "curl/…" but
 # serves this one on both endpoints; the RSS feed accepts it even when the
@@ -352,6 +359,151 @@ def _fetch_subreddit_oauth(
         return _fetch_subreddit_rss(ticker, sub, limit, timeout)
 
 
+# ---------------------------------------------------------------------------
+# trawl: Reddit's HTML search page through a self-hosted browser
+# ---------------------------------------------------------------------------
+# Measured 2026-09-13 from one IP: the RSS feed returned 429 after its first
+# request, and 18 HTML search pages loaded through trawl 2 s apart all
+# succeeded. The JSON search endpoint also loads through trawl, but it returns
+# far fewer results (0 posts where the HTML page shows 14). It is not used,
+# because a short answer that looks like success is worse than a 429.
+_TRAWL_TIMEOUT_SECONDS = 60.0
+_RECENT_SECONDS = 7 * 24 * 3600
+
+_POST_UNIT = 'data-testid="search-post-unit"'
+_COUNTER_ROW = 'data-testid="search-counter-row"'
+_NO_RESULTS_MARKER = 'data-testid="search-error-message"'
+_NO_RESULTS_TEXT = "find any results for"
+_TITLE_TAG = re.compile(r'<a\b[^>]*\bdata-testid="post-title"[^>]*>')
+_HREF = re.compile(r'\bhref="([^"]*)"')
+_ARIA_LABEL = re.compile(r'\baria-label="([^"]*)"')
+_TIMEAGO_TS = re.compile(r'<faceplate-timeago\b[^>]*\bts="([^"]*)"')
+_NUMBER = re.compile(r'<faceplate-number\b[^>]*\bnumber="(-?\d+)"')
+_PRE = re.compile(r"<pre\b[^>]*>(.*?)</pre>", re.S)
+
+
+def _trawl_url() -> str | None:
+    """Return the trawl address from ``REDDIT_TRAWL_URL``, or None if unset."""
+    return os.environ.get("REDDIT_TRAWL_URL", "").strip().rstrip("/") or None
+
+
+def _trawl_scrape(base: str, url: str) -> str | None:
+    """Load ``url`` in trawl's browser. Return the page, or None if it failed."""
+    body = json.dumps({
+        "url": url,
+        "maxTimeout": int(_TRAWL_TIMEOUT_SECONDS * 1000),
+        # Tier 1 is a plain fetch from this IP, and Reddit throttles it like
+        # the RSS feed. Tier 4 needs a residential proxy.
+        "skipHttp": True,
+        "maxTier": 3,
+    }).encode()
+    req = Request(f"{base}/scrape", data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(req, timeout=_TRAWL_TIMEOUT_SECONDS + 10) as resp:
+            payload = json.loads(_read_capped(resp))
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        # OSError includes HTTPError, which is how trawl reports a failed scrape.
+        logger.warning("trawl fetch failed for %s: %s", url, exc)
+        return None
+    if not isinstance(payload, dict) or payload.get("statusCode") != 200 or not payload.get("html"):
+        logger.warning(
+            "trawl fetch for %s returned status %s: %s",
+            url, payload.get("statusCode") if isinstance(payload, dict) else None,
+            payload.get("error") if isinstance(payload, dict) else payload,
+        )
+        return None
+    return payload["html"]
+
+
+def _parse_search_page(page: str, limit: int | None = None) -> list[dict] | None:
+    """Read the posts from Reddit's HTML search page.
+
+    Returns the posts, ``[]`` only when Reddit says it found no results, and
+    ``None`` for any other page. A redesigned page must read as a failed fetch:
+    a parser that matches nothing would report a silence that was never
+    observed (#1295).
+    """
+    starts = [m.start() for m in re.finditer(re.escape(_POST_UNIT), page)]
+    if not starts:
+        if _NO_RESULTS_MARKER in page and _NO_RESULTS_TEXT in page:
+            return []
+        return None
+    posts = []
+    for start, end in zip(starts, starts[1:] + [len(page)]):
+        block = page[start:end]
+        tag = _TITLE_TAG.search(block)
+        href = _HREF.search(tag.group(0)) if tag else None
+        label = _ARIA_LABEL.search(tag.group(0)) if tag else None
+        ts = _TIMEAGO_TS.search(block)
+        created = _iso_to_timestamp(ts.group(1)) if ts else None
+        if not (href and label and created):
+            # One post in an unknown shape means the page shape is unknown. The
+            # time is required, because the fetcher drops posts by age.
+            return None
+        row = block.find(_COUNTER_ROW)
+        numbers = _NUMBER.findall(block, row) if row >= 0 else []
+        # Reddit hides the score of some new posts. Show no counts then, not zeros.
+        score, comments = (int(numbers[0]), int(numbers[1])) if len(numbers) >= 2 else (None, None)
+        posts.append({
+            "title": html.unescape(label.group(1)),
+            "score": score,
+            "num_comments": comments,
+            "created_utc": created,
+            "selftext": "",
+            "permalink": html.unescape(href.group(1)),
+            "source": "trawl",
+        })
+        if limit is not None and len(posts) >= limit:
+            break
+    return posts
+
+
+def _fetch_post_body(base: str, permalink: str) -> str:
+    """Return a post's body through trawl, or "" if it cannot be read."""
+    page = _trawl_scrape(base, f"https://www.reddit.com{permalink.rstrip('/')}.json")
+    if page is None:
+        return ""
+    # The browser can wrap a JSON document in a viewer page. The JSON is in <pre>.
+    m = _PRE.search(page)
+    raw = html.unescape(m.group(1)) if m else page
+    try:
+        return json.loads(raw)[0]["data"]["children"][0]["data"].get("selftext") or ""
+    except (ValueError, LookupError, TypeError, AttributeError) as exc:
+        logger.warning("Reddit post body unreadable for %s: %s", permalink, exc)
+        return ""
+
+
+def _fetch_subreddit_trawl(
+    ticker: str,
+    sub: str,
+    limit: int,
+    base: str,
+    now: float | None = None,
+) -> list[dict] | None:
+    """Search one subreddit through trawl. ``None`` means the fetch failed.
+
+    Keeps only posts from the past 7 days, then the newest ``limit`` of them.
+    """
+    page = _trawl_scrape(base, _SEARCH_PAGE.format(sub=sub, qs=_search_qs(ticker, limit)))
+    if page is None:
+        return None
+    parsed = _parse_search_page(page)
+    if parsed is None:
+        logger.warning(
+            "Reddit search page for r/%s · %s does not match the expected markup", sub, ticker
+        )
+        return None
+    # On 2026-09-13 the page ignored t=week with sort=new and returned posts
+    # 17 days old. The analyst is told these posts are from the past 7 days.
+    cutoff = (time.time() if now is None else now) - _RECENT_SECONDS
+    posts = [p for p in parsed if p["created_utc"] >= cutoff][:limit]
+    # The RSS feed carries a body for every post, so every post shown gets one.
+    for post in posts:
+        if post["permalink"].startswith("/r/"):
+            post["selftext"] = _fetch_post_body(base, post["permalink"])
+    return posts
+
+
 def _fetch_subreddit(
     ticker: str,
     sub: str,
@@ -359,17 +511,25 @@ def _fetch_subreddit(
     timeout: float,
     _retry: bool = True,
 ) -> list[dict] | None:
-    """Fetch one subreddit, preferring OAuth when credentials are configured.
+    """Fetch one subreddit: OAuth, then trawl, then the RSS feed.
 
     ``None`` means the fetch failed.
 
     With OAuth (REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET): uses the JSON
     endpoint at oauth.reddit.com — 100 QPM, includes score/comment counts.
-    Without: falls back to the public RSS feed (~1 QPM, no metrics).
+    With REDDIT_TRAWL_URL: loads the HTML search page through trawl, and falls
+    back to the RSS feed if that fails.
+    Otherwise: the public RSS feed (~1 QPM, no metrics).
     """
     token = _get_oauth_token()
     if token:
         return _fetch_subreddit_oauth(ticker, sub, limit, timeout, token)
+    trawl = _trawl_url()
+    if trawl:
+        posts = _fetch_subreddit_trawl(ticker, sub, limit, trawl)
+        if posts is not None:
+            return posts
+        logger.warning("trawl could not read r/%s · %s — falling back to the RSS feed", sub, ticker)
     return _fetch_subreddit_rss(ticker, sub, limit, timeout, _retry=_retry)
 
 
