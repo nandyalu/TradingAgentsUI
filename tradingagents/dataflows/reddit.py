@@ -41,6 +41,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -545,9 +546,17 @@ def fetch_reddit_posts(
     """Fetch recent Reddit posts mentioning ``ticker`` across finance
     subreddits and return them as a formatted plaintext block.
 
-    ``inter_request_delay`` paces the (now RSS-only) per-subreddit requests to
-    stay under Reddit's public per-IP rate limit; combined with the RSS-first
-    path it makes 429s rare even when several analyses run back-to-back.
+    ``inter_request_delay`` paces the RSS-only per-subreddit requests to stay
+    under Reddit's public per-IP rate limit; combined with the RSS-first path
+    it makes 429s rare even when several analyses run back-to-back.
+
+    With ``REDDIT_TRAWL_URL`` set, subreddits are fetched at once instead of
+    one after another. trawl's per-IP rate limit does not apply the same way
+    to a real browser session, and each subreddit is an independent trawl
+    session anyway, so there is nothing to pace between them. Measured
+    2026-09-15 on 3 subreddits: 39.6s one after another against 15.2s at
+    once, no fetch failures. See ``market-data.md`` for the trawl setup
+    this assumes.
 
     When ``start_date``/``end_date`` (yyyy-mm-dd) are given, posts are trimmed to
     that window so a historical run does not leak current discussion into a
@@ -560,18 +569,33 @@ def fetch_reddit_posts(
     blocks = []
     total_posts = 0
     unavailable = []
-    allow_retry = True
-    for i, sub in enumerate(subreddits):
-        if i > 0 and inter_request_delay:
-            time.sleep(_jitter(inter_request_delay))
-        fetched = _fetch_subreddit(ticker, sub, limit_per_sub, timeout, _retry=allow_retry)
+
+    if _trawl_url():
+        with ThreadPoolExecutor(max_workers=len(subreddits)) as pool:
+            fetched_by_sub = dict(zip(
+                subreddits,
+                pool.map(lambda sub: _fetch_subreddit(ticker, sub, limit_per_sub, timeout), subreddits),
+            ))
+    else:
+        fetched_by_sub = {}
+        allow_retry = True
+        for i, sub in enumerate(subreddits):
+            if i > 0 and inter_request_delay:
+                time.sleep(_jitter(inter_request_delay))
+            fetched = _fetch_subreddit(ticker, sub, limit_per_sub, timeout, _retry=allow_retry)
+            if fetched is None:
+                # One failure means the per-IP budget is likely gone, so skip
+                # the (now 60s) back-off on the remaining subreddits rather
+                # than stalling the run on retries that cannot succeed;
+                # #1286 tracks coordinating this properly.
+                allow_retry = False
+            fetched_by_sub[sub] = fetched
+
+    for sub in subreddits:
+        fetched = fetched_by_sub[sub]
         if fetched is None:
             # A failed fetch is not an absence of discussion, so it must not be
-            # rendered as "no posts found" (#1295). One failure also means the
-            # per-IP budget is likely gone, so skip the (now 60s) back-off on
-            # the remaining subreddits rather than stalling the run on retries
-            # that cannot succeed; #1286 tracks coordinating this properly.
-            allow_retry = False
+            # rendered as "no posts found" (#1295).
             unavailable.append(sub)
             blocks.append(f"r/{sub}: <unavailable: fetch failed, not an absence of posts>")
             continue

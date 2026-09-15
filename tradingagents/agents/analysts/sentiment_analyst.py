@@ -24,6 +24,7 @@ See: https://github.com/TauricResearch/TradingAgents/issues/557
 See: https://github.com/TauricResearch/TradingAgents/issues/796
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from langchain_core.messages import AIMessage
@@ -65,16 +66,26 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
-        # returns a string (no exceptions surface from here), so the LLM
-        # always sees something — either real data or a clear placeholder.
-        news_block = get_news.func(ticker, start_date, end_date)
+        # Pre-fetch all three sources at once — none needs another's result,
+        # and run one after another they cost 1.1s + 20.2s + 39.6s = 60.9s
+        # before the LLM is even called (measured 2026-09-15, NVDA). Together
+        # they cost about 40s, the slowest of the three (Reddit through
+        # trawl). Each fetcher degrades gracefully and returns a string (no
+        # exceptions surface from here), so the LLM always sees something —
+        # either real data or a clear placeholder.
         # Pass the analysis window so a historical run trims social posts to it
         # instead of leaking today's chatter into a backtest (#1220).
-        stocktwits_block = fetch_stocktwits_messages(
-            ticker, limit=30, start_date=start_date, end_date=end_date
-        )
-        reddit_block = fetch_reddit_posts(ticker, start_date=start_date, end_date=end_date)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            news_future = pool.submit(get_news.func, ticker, start_date, end_date)
+            stocktwits_future = pool.submit(
+                fetch_stocktwits_messages, ticker, limit=30, start_date=start_date, end_date=end_date
+            )
+            reddit_future = pool.submit(
+                fetch_reddit_posts, ticker, start_date=start_date, end_date=end_date
+            )
+            news_block = news_future.result()
+            stocktwits_block = stocktwits_future.result()
+            reddit_block = reddit_future.result()
 
         # If primary social sources are unavailable, supplement with web search.
         # Must run before _build_system_message — it needs web_block's value.
