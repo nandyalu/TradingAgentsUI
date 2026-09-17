@@ -24,6 +24,7 @@ _ENV_OVERRIDES = {
     # default). Settable here for non-interactive runs; the CLI also offers an
     # interactive choice, which is skipped when the matching var is set.
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
+    "TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING": "google_search_grounding",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -92,6 +93,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "backend_url": None,
     # Provider-specific thinking configuration
     "google_thinking_level": None,      # "high", "minimal", etc.
+    # News analyst attaches Google's built-in search-grounding tool when the
+    # LLM is Gemini. Off by default: grounding needs a Google Cloud project
+    # with billing linked (Tier 1) -- on the Free tier, Gemini 3 gets zero
+    # grounding quota, so every run fails with 429 RESOURCE_EXHAUSTED.
+    # Confirmed live 2026-09-17. Env: TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING.
+    "google_search_grounding": False,
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
     # Sampling temperature, forwarded to every provider when set. None leaves

@@ -25,7 +25,7 @@ class ParallelAnalystTests(unittest.TestCase):
         self.bull_state = None
 
     def _analyst(self, key):
-        def factory(_llm):
+        def factory(_llm, **_kwargs):
             def node(state):
                 self.first_messages[key] = state["messages"][0].content
                 self.barrier.wait()

@@ -166,6 +166,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            google_search_grounding=self.config.get("google_search_grounding", False),
         )
 
         self.propagator = Propagator(

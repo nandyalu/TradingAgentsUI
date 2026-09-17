@@ -13,7 +13,7 @@ from tradingagents.agents.utils.agent_utils import (
 )
 
 
-def create_news_analyst(llm):
+def create_news_analyst(llm, google_search_grounding: bool = False):
     def news_analyst_node(state):
         current_date = state["trade_date"]
         asset_type = state.get("asset_type", "stock")
@@ -31,9 +31,10 @@ def create_news_analyst(llm):
             hasattr(llm, "__class__")
             and "google" in llm.__class__.__module__.lower()
         )
+        use_search_grounding = is_google_llm and google_search_grounding
 
         search_instruction = ""
-        if is_google_llm:
+        if use_search_grounding:
             tools.append({"google_search": {}})
             search_instruction = (
                 " In addition, you have access to Google Search grounding to perform web queries for recent earnings, "
@@ -75,7 +76,7 @@ def create_news_analyst(llm):
         prompt = prompt.partial(instrument_context=instrument_context)
 
         bind_kwargs = {}
-        if is_google_llm:
+        if use_search_grounding:
             # Gemini rejects a built-in tool (google_search) mixed with custom
             # function tools unless this is set explicitly. Confirmed 2026-09-17:
             # the same request returns 400 INVALID_ARGUMENT without it.
