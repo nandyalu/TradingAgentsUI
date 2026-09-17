@@ -134,7 +134,21 @@ def create_trader(llm):
                     f"{report_section}"
                     f"Proposed Investment Plan:\n{investment_plan}\n\n"
                     f"{snapshot}\n\n"
-                    f"Make an informed, strategic trading decision."
+                    "Make an informed, strategic trading decision.\n\n"
+                    "## Output\n\n"
+                    "Write these sections, in this order, starting with the action "
+                    "on its own line:\n\n"
+                    "- **Action**: exactly one of Buy / Hold / Sell. A research "
+                    "recommendation of Overweight is a Buy and Underweight is a Sell, "
+                    "sized by how strong the case is; conflict alone is not a Hold.\n"
+                    "- **Reasoning**: why, against the plan and the price structure\n"
+                    "- **Bull Case** and **Bear Case**: the strongest arguments each way\n"
+                    "- **Win Probability**: how likely the thesis is to play out, 0 to 100\n"
+                    "- **Stop ATR Multiple** and **Target R Multiple**: how far the stop "
+                    "sits in ATRs, and what the trade aims to make against what it risks. "
+                    "State the multiples, never a price: Python computes every level from "
+                    "the verified close and ATR.\n"
+                    "- **Position Sizing**: when you can state it"
                 ),
             },
         ]
