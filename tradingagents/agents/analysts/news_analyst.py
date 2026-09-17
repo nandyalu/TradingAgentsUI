@@ -27,8 +27,21 @@ def create_news_analyst(llm):
             get_prediction_markets,
         ]
 
+        is_google_llm = (
+            hasattr(llm, "__class__")
+            and "google" in llm.__class__.__module__.lower()
+        )
+
+        search_instruction = ""
+        if is_google_llm:
+            tools.append({"google_search": {}})
+            search_instruction = (
+                " In addition, you have access to Google Search grounding to perform web queries for recent earnings, "
+                "SEC filings, press releases, Deep Research insights, and sector shifts."
+            )
+
         system_message = (
-            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(ticker, start_date, end_date) for {asset_label}-specific news by ticker symbol, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
+            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(ticker, start_date, end_date) for {asset_label}-specific news by ticker symbol, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events).{search_instruction} Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )
@@ -51,14 +64,28 @@ def create_news_analyst(llm):
             ]
         )
 
+        tool_names_list = [
+            t.name if hasattr(t, "name") else (list(t.keys())[0] if isinstance(t, dict) else str(t))
+            for t in tools
+        ]
+        tool_names_str = ", ".join(tool_names_list)
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
+        prompt = prompt.partial(tool_names=tool_names_str)
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        chain = prompt | llm.bind_tools(tools)
+        bind_kwargs = {}
+        if is_google_llm:
+            # Gemini rejects a built-in tool (google_search) mixed with custom
+            # function tools unless this is set explicitly. Confirmed 2026-09-17:
+            # the same request returns 400 INVALID_ARGUMENT without it.
+            bind_kwargs["tool_config"] = {
+                "include_server_side_tool_invocations": True
+            }
+
+        chain = prompt | llm.bind_tools(tools, **bind_kwargs)
         result = invoke_with_tool_call_recovery(
-            chain, state["messages"], [t.name for t in tools], "News Analyst",
+            chain, state["messages"], tool_names_list, "News Analyst",
         )
 
         report = ""
