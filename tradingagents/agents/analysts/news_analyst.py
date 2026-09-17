@@ -74,7 +74,16 @@ def create_news_analyst(llm):
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        chain = prompt | llm.bind_tools(tools)
+        bind_kwargs = {}
+        if is_google_llm:
+            # Gemini rejects a built-in tool (google_search) mixed with custom
+            # function tools unless this is set explicitly. Confirmed 2026-09-17:
+            # the same request returns 400 INVALID_ARGUMENT without it.
+            bind_kwargs["tool_config"] = {
+                "include_server_side_tool_invocations": True
+            }
+
+        chain = prompt | llm.bind_tools(tools, **bind_kwargs)
         result = invoke_with_tool_call_recovery(
             chain, state["messages"], tool_names_list, "News Analyst",
         )
