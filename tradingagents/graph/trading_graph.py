@@ -151,6 +151,20 @@ class TradingAgentsGraph:
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
 
+        # News analyst runs on a different Google model when one is set --
+        # e.g. a Gemma model with open search-grounding quota, when the main
+        # quick_think_llm is a Gemini 3 model that may have none. Otherwise
+        # the news analyst just reuses quick_thinking_llm like every other
+        # analyst.
+        grounding_model = self.config.get("google_search_grounding_model")
+        if self.config.get("google_search_grounding") and grounding_model:
+            self.news_analyst_llm = create_llm_client(
+                provider="google",
+                model=grounding_model,
+            ).get_llm()
+        else:
+            self.news_analyst_llm = self.quick_thinking_llm
+
         self.memory_log = TradingMemoryLog(self.config)
 
         # Create tool nodes
@@ -167,6 +181,7 @@ class TradingAgentsGraph:
             self.tool_nodes,
             self.conditional_logic,
             google_search_grounding=self.config.get("google_search_grounding", False),
+            news_analyst_llm=self.news_analyst_llm,
         )
 
         self.propagator = Propagator(

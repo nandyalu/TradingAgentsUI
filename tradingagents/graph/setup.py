@@ -52,6 +52,7 @@ class GraphSetup:
         tool_nodes: dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
         google_search_grounding: bool = False,
+        news_analyst_llm: Any = None,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
@@ -59,6 +60,9 @@ class GraphSetup:
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
         self.google_search_grounding = google_search_grounding
+        # Falls back to quick_thinking_llm when no override was built
+        # (see TradingAgentsGraph.__init__ for when one is).
+        self.news_analyst_llm = news_analyst_llm or quick_thinking_llm
 
     def setup_graph(
         self, selected_analysts=("market", "social", "news", "fundamentals")
@@ -78,7 +82,7 @@ class GraphSetup:
             "market": lambda: create_market_analyst(self.quick_thinking_llm),
             "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
             "news": lambda: create_news_analyst(
-                self.quick_thinking_llm,
+                self.news_analyst_llm,
                 google_search_grounding=self.google_search_grounding,
             ),
             "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),

@@ -25,6 +25,7 @@ _ENV_OVERRIDES = {
     # interactive choice, which is skipped when the matching var is set.
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING": "google_search_grounding",
+    "TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING_MODEL": "google_search_grounding_model",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -99,6 +100,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # grounding quota, so every run fails with 429 RESOURCE_EXHAUSTED.
     # Confirmed live 2026-09-17. Env: TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING.
     "google_search_grounding": False,
+    # Override: run the news analyst on a different Google model when
+    # grounding is on (e.g. a Gemma model with open grounding quota, instead
+    # of a Gemini 3 model that may have none -- see google_search_grounding
+    # above). None reuses quick_think_llm, unchanged.
+    "google_search_grounding_model": None,
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
     # Sampling temperature, forwarded to every provider when set. None leaves
