@@ -269,6 +269,20 @@ def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
     )
 
 
+def report_or_absent(text: str, source: str) -> str:
+    """An analyst's report, or a marker saying it was never produced.
+
+    A report is empty when its analyst was not selected, refused, or returned
+    nothing. Interpolating that into a labelled section presents an absence as a
+    blank finding, and the reading agent fills it in from nothing, the same way
+    an empty opponent argument used to invite an invented rebuttal (#1176).
+    """
+    text = (text or "").strip()
+    if text:
+        return text
+    return f"(No {source} report in this run: it is not available, not an empty finding.)"
+
+
 def analyst_placeholder(state) -> HumanMessage:
     """The first message of every analyst except the first one.
 
