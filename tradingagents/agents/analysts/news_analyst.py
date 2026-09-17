@@ -64,16 +64,17 @@ def create_news_analyst(llm):
             ]
         )
 
-        tool_names = ", ".join(
-            [t.name if hasattr(t, "name") else (list(t.keys())[0] if isinstance(t, dict) else str(t)) for t in tools]
-        )
+        tool_names_list = [
+            t.name if hasattr(t, "name") else (list(t.keys())[0] if isinstance(t, dict) else str(t))
+            for t in tools
+        ]
+        tool_names_str = ", ".join(tool_names_list)
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=tool_names)
+        prompt = prompt.partial(tool_names=tool_names_str)
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
         chain = prompt | llm.bind_tools(tools)
-        tool_names_list = [t.name for t in tools if hasattr(t, "name")]
         result = invoke_with_tool_call_recovery(
             chain, state["messages"], tool_names_list, "News Analyst",
         )
