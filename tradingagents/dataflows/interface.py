@@ -319,6 +319,8 @@ def route_to_vendor(method: str, *args, **kwargs):
     vendor_chain = _resolve_vendor_chain(method, category)
 
     last_no_data: NoMarketDataError | None = None
+    last_unavailable: VendorRateLimitError | None = None
+    last_unavailable: VendorRateLimitError | None = None
     first_error: Exception | None = None
 
     for vendor in vendor_chain:
@@ -341,8 +343,11 @@ def route_to_vendor(method: str, *args, **kwargs):
             # valid list and ask again. See BadVendorArgumentError's docstring
             # for the two analyses this cost before it was separated out.
             raise
-        except VendorRateLimitError:
+        except VendorRateLimitError as e:
             logger.warning("Vendor %r rate-limited for %s; trying next.", vendor, method)
+            # Kept so an all-unavailable chain can say the vendor was the
+            # problem, rather than reporting nothing about the symbol.
+            last_unavailable = e
             _circuit_breaker.record_failure(vendor)
             continue
         except VendorNotConfiguredError as e:
@@ -363,6 +368,15 @@ def route_to_vendor(method: str, *args, **kwargs):
     # All vendors exhausted — surface the best diagnostic available.
     if last_no_data is not None:
         return _build_no_data_message(last_no_data, first_error, method)
+
+    # Every vendor was throttled or unreachable: that is a fact about the
+    # vendors, not about the instrument, and it must not end the run.
+    if last_unavailable is not None:
+        return (
+            f"DATA_UNAVAILABLE: no configured vendor could serve {method} right now "
+            f"({last_unavailable}). This says nothing about the instrument; report the "
+            f"data as unavailable and do not estimate or fabricate values."
+        )
 
     if first_error is not None:
         if category in OPTIONAL_CATEGORIES:

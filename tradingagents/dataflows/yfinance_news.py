@@ -8,6 +8,7 @@ from dateutil.relativedelta import relativedelta
 
 from .config import get_config
 from .date_window import coverage_gap, in_window
+from .errors import NoMarketDataError
 from .stockstats_utils import yf_retry
 from .symbol_utils import normalize_symbol
 
@@ -118,7 +119,7 @@ def get_news_yfinance(
         return f"## {ticker}{resolved} News, from {start_date} to {end_date}:\n\n{news_str}"
 
     except Exception as e:
-        return f"Error fetching news for {ticker}: {str(e)}"
+        raise NoMarketDataError(ticker, ticker, f"news unavailable: {e}") from e
 
 
 def get_global_news_yfinance(
@@ -197,7 +198,10 @@ def get_global_news_yfinance(
         buckets.append(bucket)
 
     if errors and errors == len(search_queries):
-        return f"Error fetching global news: all {errors} queries failed"
+        # A failure is the vendor's, not the market's. Returned as text it reads
+        # as an answer, and the router stops at this vendor.
+        raise NoMarketDataError("global news", "global news",
+                                f"all {errors} queries failed")
 
     selected: list[dict] = []
     for rank in range(max((len(b) for b in buckets), default=0)):
