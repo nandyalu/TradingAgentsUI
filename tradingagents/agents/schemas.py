@@ -36,9 +36,31 @@ _NULLISH_FLOAT = {"", "none", "n/a", "na", "null", "nil", "-", "tbd", "unknown"}
 
 
 def _coerce_optional_float(value):
-    if isinstance(value, str) and value.strip().lower() in _NULLISH_FLOAT:
+    """Normalise an LLM-written optional numeric field before validation.
+
+    Three shapes show up in practice: a placeholder string ("None", "N/A") in
+    place of an omitted value (#1058); a percentage where a price was asked for
+    ("15%", #1288); and a human-formatted price ("$1,234.50"). A percentage
+    cannot be salvaged into an absolute level -- reading "15%" as 15 would put a
+    stop at $15 on a $600 stock -- so it is dropped like a placeholder, leaving
+    one bad field to null out instead of failing the whole proposal. A formatted
+    price is reduced to its number.
+
+    Anything that is not a single number is dropped the same way. A range
+    ("150-160") or a hedge ("around 150") would otherwise reach pydantic, fail
+    validation, and discard the whole decision, losing every field the model got
+    right along with the price.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.lower() in _NULLISH_FLOAT or text.endswith("%"):
         return None
-    return value
+    cleaned = text.replace(",", "").lstrip("$€£¥").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -417,10 +439,11 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         "",
         f"**Investment Thesis**: {decision.investment_thesis}",
     ]
-    if decision.price_target is not None:
-        parts.extend(["", f"**Price Target**: {decision.price_target}"])
-    if decision.time_horizon:
-        parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    # Named even when absent: a missing line reads as a field nobody asked for,
+    # so a reader cannot tell "no target" from "target not reported".
+    target = decision.price_target if decision.price_target is not None else "not provided"
+    parts.extend(["", f"**Price Target**: {target}"])
+    parts.extend(["", f"**Time Horizon**: {decision.time_horizon or 'not provided'}"])
     return "\n".join(parts)
 
 
