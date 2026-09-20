@@ -301,3 +301,53 @@ class TestFormatterShowsTrawlPosts:
         assert "body excerpt: Datacenter revenue beat" in out
         assert "via RSS" not in out
         assert "Too new to score" in out
+
+
+@pytest.mark.unit
+class TestTrawlAsksForOneSubredditAtATime:
+    """Reddit's HTML search page has no `r/a+b+c` form: it answers "no results",
+    which the parser reads as a real absence. Measured 2026-09-20 for NVDA over
+    one week: 13 posts on the combined RSS feed, 3 on a single subreddit through
+    trawl, 0 on the combined page through trawl."""
+
+    def test_a_combined_search_is_split_into_one_page_each(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        asked = []
+
+        def record(ticker, sub, limit, base):
+            asked.append(sub)
+            return [{"title": f"from {sub}", "created_utc": 1, "subreddit": sub}]
+
+        with patch.object(reddit, "_fetch_subreddit_trawl", side_effect=record):
+            posts = reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0)
+
+        assert asked == ["a", "b", "c"]
+        assert [p["subreddit"] for p in posts] == ["a", "b", "c"]
+
+    def test_a_page_trawl_cannot_read_is_asked_of_the_feed_alone(self, monkeypatch):
+        """trawl answers 500 for one page under load. Sending the whole search
+        to the feed would discard the pages that did load."""
+        monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        trawled = {"a": [{"title": "a", "created_utc": 1}], "b": None, "c": []}
+
+        with patch.object(reddit, "_fetch_subreddit_trawl",
+                          side_effect=lambda t, sub, limit, base: trawled[sub]), \
+                patch.object(reddit, "_fetch_subreddit_rss",
+                             return_value=[{"title": "b", "created_utc": 1}]) as rss:
+            posts = reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0)
+
+        rss.assert_called_once_with("NVDA", "b", 100, 10.0, _retry=True)
+        assert [p["title"] for p in posts] == ["a", "b"]
+
+    def test_a_subreddit_neither_path_can_read_makes_the_search_unavailable(self, monkeypatch):
+        """A partial set would render the missing subreddit as "no posts
+        found", which is the silence this path exists to avoid."""
+        monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        trawled = {"a": [{"title": "a", "created_utc": 1}], "b": None, "c": []}
+
+        with patch.object(reddit, "_fetch_subreddit_trawl",
+                          side_effect=lambda t, sub, limit, base: trawled[sub]), \
+                patch.object(reddit, "_fetch_subreddit_rss", side_effect=[None, ["combined"]]) as rss:
+            assert reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0) == ["combined"]
+
+        assert rss.call_args_list[-1].args[1] == "a+b+c"

@@ -20,10 +20,14 @@ Supports three modes:
 
 On a 429 we back off once (honouring ``Retry-After``).
 
-Every mode searches all the subreddits in one combined request (``r/a+b+c``),
-because anonymous RSS allows about one request per minute per IP and a
-request per subreddit spent a back-off on almost every run. Each entry
-names its subreddit, and posts are grouped back by it.
+The RSS feed and the JSON endpoint search all the subreddits in one combined
+request (``r/a+b+c``), because anonymous RSS allows about one request per
+minute per IP and a request per subreddit spent a back-off on almost every
+run. Each entry names its subreddit, and posts are grouped back by it.
+**Reddit's HTML search page has no combined form** and answers "no results"
+for one, so the trawl path asks for each subreddit on its own, at the same
+time. Reddit does not rate-limit trawl the way it rate-limits the feed, so
+nothing is lost by it.
 
 A fetch that fails is reported as ``<unavailable>``, never as "no posts found":
 the two are different claims, and passing a rate-limited fetch off as silence
@@ -46,6 +50,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -551,15 +556,50 @@ def _fetch_subreddit(
     With REDDIT_TRAWL_URL: loads the HTML search page through trawl, and falls
     back to the RSS feed if that fails.
     Otherwise: the public RSS feed (~1 QPM, no metrics).
+
+    ``sub`` may name several subreddits as ``a+b+c``. The RSS feed and the JSON
+    endpoint search that as one combined feed; the HTML search page has no
+    such form and answers "no results", so the trawl path asks for each
+    subreddit on its own. Measured 2026-09-20: NVDA over a week returned 13
+    posts on the combined RSS feed, 3 on a single subreddit through trawl, and
+    0 on the combined page through trawl.
     """
     token = _get_oauth_token()
     if token:
         return _fetch_subreddit_oauth(ticker, sub, limit, timeout, token)
     trawl = _trawl_url()
     if trawl:
-        posts = _fetch_subreddit_trawl(ticker, sub, limit, trawl)
-        if posts is not None:
+        # Each page is its own trawl session, and trawl is not what Reddit
+        # rate-limits, so these run at once: 39.6s one after another against
+        # 15.2s at once, measured 2026-09-15 on 3 subreddits.
+        names = sub.split("+")
+
+        def _one(name: str) -> list[dict] | None:
+            posts = _fetch_subreddit_trawl(ticker, name, limit, trawl)
+            if posts is None:
+                # trawl answers HTTP 500 for a page now and then, and three at
+                # once is when it happens: measured 2026-09-20, the same three
+                # subreddits gave 6/3/3 one after another and 6/3/fail at once.
+                # Ask the feed for that one subreddit rather than discarding the
+                # pages that did load.
+                logger.warning(
+                    "trawl could not read r/%s · %s — asking the RSS feed for it", name, ticker,
+                )
+                posts = _fetch_subreddit_rss(ticker, name, limit, timeout, _retry=_retry)
             return posts
+
+        with ThreadPoolExecutor(max_workers=len(names)) as pool:
+            fetched = list(pool.map(_one, names))
+        if all(posts is not None for posts in fetched):
+            return [post for posts in fetched for post in posts]
+        if len(names) == 1:
+            # The feed already answered for this one subreddit, inside _one.
+            # Asking again with the same name would be the same request twice.
+            return None
+        # A subreddit neither path could read leaves the set incomplete, and a
+        # partial set renders the missing ones as "no posts found" — the silence
+        # this whole path exists to avoid. One combined feed request is the last
+        # thing to try before the caller reports the search unavailable.
         logger.warning("trawl could not read r/%s · %s — falling back to the RSS feed", sub, ticker)
     return _fetch_subreddit_rss(ticker, sub, limit, timeout, _retry=_retry)
 
