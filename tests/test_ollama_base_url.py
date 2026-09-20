@@ -189,10 +189,12 @@ def test_ollama_offers_custom_model_id():
 
 
 @pytest.mark.unit
-def test_structured_output_suppresses_object_tool_choice(monkeypatch):
+def test_structured_output_takes_the_local_client(monkeypatch):
     """Ollama rejects the object-form tool_choice like other local servers
     (#1062), and a local model ID has no capability entry saying otherwise, so
-    it takes the same client as the generic local endpoint."""
+    it takes the same client as the generic local endpoint. On this fork that
+    client answers with json_schema, which constrains the server's sampler, so
+    no tool is bound and no tool_choice is sent at all."""
     from langchain_openai import ChatOpenAI
     from pydantic import BaseModel
 
@@ -210,4 +212,5 @@ def test_structured_output_suppresses_object_tool_choice(monkeypatch):
 
     create_llm_client(provider="ollama", model="qwen3:30b").get_llm().with_structured_output(Schema)
 
-    assert captured["tool_choice"] is None
+    assert captured["method"] == "json_schema"
+    assert "tool_choice" not in captured

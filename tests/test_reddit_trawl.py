@@ -296,7 +296,7 @@ class TestFormatterShowsTrawlPosts:
         posts = reddit._parse_search_page(_RESULTS, limit=10)
         posts[1]["selftext"] = "Datacenter revenue beat"
         with patch.object(reddit, "_fetch_subreddit", return_value=posts):
-            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks",), inter_request_delay=0)
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks",))
         assert "210↑" in out and "12c" in out
         assert "body excerpt: Datacenter revenue beat" in out
         assert "via RSS" not in out
