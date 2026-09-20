@@ -7,6 +7,7 @@ The fixture markup is cut down from real pages fetched on 2026-09-13.
 from __future__ import annotations
 
 import json
+import time
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -284,10 +285,11 @@ class TestFetchSubredditRouting:
 
     def test_trawl_failure_falls_back_to_rss(self, monkeypatch):
         monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
         with patch.object(reddit, "_fetch_subreddit_trawl", return_value=None), \
                 patch.object(reddit, "_fetch_subreddit_rss", return_value=None) as rss:
             assert reddit._fetch_subreddit("NVDA", "stocks", 5, 10.0, _retry=False) is None
-        rss.assert_called_once_with("NVDA", "stocks", 5, 10.0, _retry=False)
+        rss.assert_called_once_with("NVDA", "stocks", 5, 10.0, _retry=False, use_feed=False)
 
 
 @pytest.mark.unit
@@ -312,42 +314,122 @@ class TestTrawlAsksForOneSubredditAtATime:
 
     def test_a_combined_search_is_split_into_one_page_each(self, monkeypatch):
         monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
         asked = []
 
-        def record(ticker, sub, limit, base):
+        def record(ticker, sub, limit, base, **kw):
             asked.append(sub)
             return [{"title": f"from {sub}", "created_utc": 1, "subreddit": sub}]
 
         with patch.object(reddit, "_fetch_subreddit_trawl", side_effect=record):
             posts = reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0)
 
-        assert asked == ["a", "b", "c"]
+        # The three pages load at once, so they finish in whatever order the
+        # threads return; only the set is fixed. The posts keep the requested
+        # order, because pool.map does.
+        assert sorted(asked) == ["a", "b", "c"]
         assert [p["subreddit"] for p in posts] == ["a", "b", "c"]
 
     def test_a_page_trawl_cannot_read_is_asked_of_the_feed_alone(self, monkeypatch):
         """trawl answers 500 for one page under load. Sending the whole search
         to the feed would discard the pages that did load."""
         monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
         trawled = {"a": [{"title": "a", "created_utc": 1}], "b": None, "c": []}
 
         with patch.object(reddit, "_fetch_subreddit_trawl",
-                          side_effect=lambda t, sub, limit, base: trawled[sub]), \
+                          side_effect=lambda t, sub, limit, base, **kw: trawled[sub]), \
                 patch.object(reddit, "_fetch_subreddit_rss",
                              return_value=[{"title": "b", "created_utc": 1}]) as rss:
             posts = reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0)
 
-        rss.assert_called_once_with("NVDA", "b", 100, 10.0, _retry=True)
+        rss.assert_called_once_with("NVDA", "b", 100, 10.0, _retry=True, use_feed=False)
         assert [p["title"] for p in posts] == ["a", "b"]
 
     def test_a_subreddit_neither_path_can_read_makes_the_search_unavailable(self, monkeypatch):
         """A partial set would render the missing subreddit as "no posts
         found", which is the silence this path exists to avoid."""
         monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
         trawled = {"a": [{"title": "a", "created_utc": 1}], "b": None, "c": []}
 
         with patch.object(reddit, "_fetch_subreddit_trawl",
-                          side_effect=lambda t, sub, limit, base: trawled[sub]), \
+                          side_effect=lambda t, sub, limit, base, **kw: trawled[sub]), \
                 patch.object(reddit, "_fetch_subreddit_rss", side_effect=[None, ["combined"]]) as rss:
             assert reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0) == ["combined"]
 
         assert rss.call_args_list[-1].args[1] == "a+b+c"
+
+
+@pytest.mark.unit
+class TestCustomFeed:
+    """REDDIT_MULTIREDDIT_URL points both paths at one public custom feed, so
+    one request covers every subreddit in it. Measured 2026-09-20 for NVDA over
+    one week: the same 12 posts as three per-subreddit requests through trawl,
+    and 13 through the feed's Atom search."""
+
+    FEED = "https://www.reddit.com/user/someone/m/trading"
+
+    def test_the_search_page_is_the_feed_and_is_loaded_once(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_TRAWL_URL", "http://t")
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", self.FEED + "/")
+        loaded = []
+
+        def scrape(base, url, **kw):
+            loaded.append(url)
+            return _RESULTS
+
+        with patch.object(reddit, "_trawl_scrape", side_effect=scrape), \
+                patch.object(reddit, "_fetch_post_body", return_value=""):
+            reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0)
+
+        pages = [url for url in loaded if "/search/" in url]
+        assert len(pages) == 1, f"one request covers the feed: {pages}"
+        assert pages[0].startswith(self.FEED + "/search/?"), pages[0]
+
+    def test_the_feed_is_searched_over_rss_too(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", self.FEED)
+        assert reddit._rss_url("a+b+c", "q=NVDA").startswith(self.FEED + "/search.rss?")
+
+    def test_a_shared_feed_is_searched_by_default(self, monkeypatch):
+        monkeypatch.delenv("REDDIT_MULTIREDDIT_URL", raising=False)
+        assert reddit._rss_url("a+b+c", "q=NVDA").startswith(
+            reddit._DEFAULT_MULTIREDDIT + "/search.rss?")
+
+    def test_off_searches_the_subreddits_themselves(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
+        assert reddit._rss_url("a+b+c", "q=NVDA").startswith(
+            "https://www.reddit.com/r/a+b+c/search.rss?")
+        assert reddit._search_page_url("stocks", "q=NVDA").startswith(
+            "https://www.reddit.com/r/stocks/search/?")
+
+    def test_a_feed_that_cannot_be_read_falls_back_to_the_subreddits(self, monkeypatch):
+        """The default feed belongs to someone else. If it is renamed, made
+        private or deleted, that must cost a request, not the whole report."""
+        monkeypatch.delenv("REDDIT_TRAWL_URL", raising=False)
+        monkeypatch.delenv("REDDIT_MULTIREDDIT_URL", raising=False)
+        asked = []
+
+        def rss(ticker, sub, limit, timeout, _retry=True, *, use_feed=True):
+            asked.append(use_feed)
+            return None if use_feed else [{"title": "from r/stocks", "created_utc": 1}]
+
+        with patch.object(reddit, "_fetch_subreddit_rss", side_effect=rss):
+            posts = reddit._fetch_subreddit("NVDA", "a+b+c", 100, 10.0)
+
+        assert asked == [True, False], "the feed is tried first, then the subreddits"
+        assert [p["title"] for p in posts] == ["from r/stocks"]
+
+    def test_a_feed_only_groups_what_it_returned(self, monkeypatch):
+        """A feed holds whichever subreddits its owner put in it. Seeding the
+        caller's names would report an absence in a place nobody searched."""
+        monkeypatch.delenv("REDDIT_TRAWL_URL", raising=False)
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", self.FEED)
+        posts = [{"title": "FROM CONGRESS", "created_utc": time.time(),
+                  "subreddit": "tradingwithcongress", "selftext": ""}]
+
+        with patch.object(reddit, "_fetch_subreddit", return_value=posts):
+            out = reddit.fetch_reddit_posts("NVDA", subreddits=("stocks", "investing"))
+
+        assert "r/tradingwithcongress" in out and "FROM CONGRESS" in out
+        assert "no posts found" not in out, out

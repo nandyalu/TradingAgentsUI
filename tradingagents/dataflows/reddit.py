@@ -29,6 +29,13 @@ for one, so the trawl path asks for each subreddit on its own, at the same
 time. Reddit does not rate-limit trawl the way it rate-limits the feed, so
 nothing is lost by it.
 
+**A custom feed replaces all of that with one request on either path**, and
+one is searched by default: a public feed covering r/stocks, r/investing,
+r/wallstreetbets and r/tradingwithcongress. ``REDDIT_MULTIREDDIT_URL`` points
+this at your own feed, and the literal ``off`` searches the subreddits
+themselves. A feed that cannot be read falls back to searching them too, so a
+feed this project does not own cannot take the sentiment report down with it.
+
 A fetch that fails is reported as ``<unavailable>``, never as "no posts found":
 the two are different claims, and passing a rate-limited fetch off as silence
 hands the sentiment analyst a signal that was never observed (#1295).
@@ -259,6 +266,8 @@ def _fetch_subreddit_rss(
     limit: int,
     timeout: float,
     _retry: bool = True,
+    *,
+    use_feed: bool = True,
 ) -> list[dict] | None:
     """Default path: parse the public Atom search feed for a subreddit.
 
@@ -271,7 +280,7 @@ def _fetch_subreddit_rss(
     failed fetch as "no posts found" hands the sentiment analyst an absence of
     discussion that was never observed (#1295).
     """
-    url = _RSS.format(sub=sub, qs=_search_qs(ticker, limit))
+    url = _rss_url(sub, _search_qs(ticker, limit), use_feed=use_feed)
     req = Request(url, headers={"User-Agent": _UA})
     try:
         with urlopen(req, timeout=timeout) as resp:
@@ -420,6 +429,45 @@ def _trawl_url() -> str | None:
     return os.environ.get("REDDIT_TRAWL_URL", "").strip().rstrip("/") or None
 
 
+# A public Reddit custom feed covering r/stocks, r/investing, r/wallstreetbets
+# and r/tradingwithcongress. One request searches all four, on either path:
+# measured 2026-09-20 for NVDA over one week, it returned the same 12 posts
+# through trawl as three per-subreddit requests did, in one request instead of
+# three and in half the time, and 13 through its Atom search.
+#
+# It belongs to a person, not to this project, and it is the default because
+# they offered it. **Nothing depends on it staying there**: a feed that cannot
+# be read falls back to searching DEFAULT_SUBREDDITS directly, and
+# REDDIT_MULTIREDDIT_URL replaces it with your own feed or turns it off.
+_DEFAULT_MULTIREDDIT = "https://www.reddit.com/user/commercial-catch-680/m/trading"
+
+
+def _multireddit_url() -> str | None:
+    """The custom feed to search in place of the subreddits, or None for none.
+
+    ``REDDIT_MULTIREDDIT_URL`` takes a public custom feed such as
+    ``https://www.reddit.com/user/<name>/m/<feed>``, and one request then
+    covers every subreddit in it. Unset, the shared feed above is used; the
+    literal ``off`` searches the subreddits themselves instead.
+    """
+    configured = os.environ.get("REDDIT_MULTIREDDIT_URL", "").strip().rstrip("/")
+    if configured.lower() == "off":
+        return None
+    return configured or _DEFAULT_MULTIREDDIT
+
+
+def _search_page_url(sub: str, qs: str, *, use_feed: bool = True) -> str:
+    """The HTML search page to load: the custom feed's, or the subreddit's."""
+    feed = _multireddit_url() if use_feed else None
+    return f"{feed}/search/?{qs}" if feed else _SEARCH_PAGE.format(sub=sub, qs=qs)
+
+
+def _rss_url(sub: str, qs: str, *, use_feed: bool = True) -> str:
+    """The Atom search feed to read: the custom feed's, or the subreddit's."""
+    feed = _multireddit_url() if use_feed else None
+    return f"{feed}/search.rss?{qs}" if feed else _RSS.format(sub=sub, qs=qs)
+
+
 def _trawl_scrape(base: str, url: str) -> str | None:
     """Load ``url`` in trawl's browser. Return the page, or None if it failed."""
     body = json.dumps({
@@ -515,12 +563,14 @@ def _fetch_subreddit_trawl(
     limit: int,
     base: str,
     now: float | None = None,
+    *,
+    use_feed: bool = True,
 ) -> list[dict] | None:
     """Search one subreddit through trawl. ``None`` means the fetch failed.
 
     Keeps only posts from the past 7 days, then the newest ``limit`` of them.
     """
-    page = _trawl_scrape(base, _SEARCH_PAGE.format(sub=sub, qs=_search_qs(ticker, limit)))
+    page = _trawl_scrape(base, _search_page_url(sub, _search_qs(ticker, limit), use_feed=use_feed))
     if page is None:
         return None
     parsed = _parse_search_page(page)
@@ -563,19 +613,49 @@ def _fetch_subreddit(
     subreddit on its own. Measured 2026-09-20: NVDA over a week returned 13
     posts on the combined RSS feed, 3 on a single subreddit through trawl, and
     0 on the combined page through trawl.
+
+    A custom feed is one request for all of them, and **a feed that cannot be
+    read is not the end of the search**: the subreddits are searched directly
+    instead. The default feed belongs to someone else, so it may be renamed,
+    made private or deleted without this project hearing about it, and that
+    must cost a request rather than the whole sentiment report.
     """
     token = _get_oauth_token()
     if token:
         return _fetch_subreddit_oauth(ticker, sub, limit, timeout, token)
+    feed = _multireddit_url()
+    posts = _search_subreddits(ticker, sub, limit, timeout, _retry, use_feed=bool(feed))
+    if posts is None and feed:
+        logger.warning(
+            "the custom feed %s could not be read for %s — searching r/%s directly",
+            feed, ticker, sub,
+        )
+        posts = _search_subreddits(ticker, sub, limit, timeout, _retry, use_feed=False)
+    return posts
+
+
+def _search_subreddits(
+    ticker: str,
+    sub: str,
+    limit: int,
+    timeout: float,
+    _retry: bool,
+    *,
+    use_feed: bool,
+) -> list[dict] | None:
+    """trawl first, then the Atom feed. ``use_feed`` picks what is searched."""
     trawl = _trawl_url()
     if trawl:
         # Each page is its own trawl session, and trawl is not what Reddit
         # rate-limits, so these run at once: 39.6s one after another against
         # 15.2s at once, measured 2026-09-15 on 3 subreddits.
-        names = sub.split("+")
+        # A custom feed already spans the subreddits, so it is one request
+        # whatever names the caller passed; splitting would load the same page
+        # once per name.
+        names = [sub] if use_feed else sub.split("+")
 
         def _one(name: str) -> list[dict] | None:
-            posts = _fetch_subreddit_trawl(ticker, name, limit, trawl)
+            posts = _fetch_subreddit_trawl(ticker, name, limit, trawl, use_feed=use_feed)
             if posts is None:
                 # trawl answers HTTP 500 for a page now and then, and three at
                 # once is when it happens: measured 2026-09-20, the same three
@@ -585,7 +665,9 @@ def _fetch_subreddit(
                 logger.warning(
                     "trawl could not read r/%s · %s — asking the RSS feed for it", name, ticker,
                 )
-                posts = _fetch_subreddit_rss(ticker, name, limit, timeout, _retry=_retry)
+                posts = _fetch_subreddit_rss(
+                    ticker, name, limit, timeout, _retry=_retry, use_feed=use_feed,
+                )
             return posts
 
         with ThreadPoolExecutor(max_workers=len(names)) as pool:
@@ -601,7 +683,7 @@ def _fetch_subreddit(
         # this whole path exists to avoid. One combined feed request is the last
         # thing to try before the caller reports the search unavailable.
         logger.warning("trawl could not read r/%s · %s — falling back to the RSS feed", sub, ticker)
-    return _fetch_subreddit_rss(ticker, sub, limit, timeout, _retry=_retry)
+    return _fetch_subreddit_rss(ticker, sub, limit, timeout, _retry=_retry, use_feed=use_feed)
 
 
 def fetch_reddit_posts(
@@ -634,7 +716,8 @@ def fetch_reddit_posts(
     # ("BTC") so the query actually matches discussion instead of near-nothing.
     ticker = crypto_base(ticker) or ticker
     subreddits = list(subreddits)
-    label = ", ".join(f"r/{s}" for s in subreddits)
+    feed = _multireddit_url()
+    label = feed if feed else ", ".join(f"r/{s}" for s in subreddits)
     fetched = _fetch_subreddit(ticker, "+".join(subreddits), _FEED_PAGE, timeout)
     if fetched is None:
         return f"<Reddit unavailable: fetch failed ({label}); this is not an absence of discussion>"
@@ -652,7 +735,12 @@ def fetch_reddit_posts(
     # Group by the subreddit each entry names, in the requested order. Nothing
     # is dropped: an unlabelled post from a one-subreddit request belongs to it,
     # and any other name gets its own block.
-    by_sub = {s.lower(): (s, []) for s in subreddits}
+    #
+    # A custom feed holds whichever subreddits its owner put in it, which need
+    # not be the ones the caller named, so only what came back is grouped.
+    # Seeding the caller's names would render a subreddit the feed does not
+    # even carry as "no posts found" — an absence in a place nobody searched.
+    by_sub = {} if feed else {s.lower(): (s, []) for s in subreddits}
     for p in posts:
         name = p.get("subreddit") or (subreddits[0] if len(subreddits) == 1 else "unknown")
         by_sub.setdefault(name.lower(), (name, []))[1].append(p)

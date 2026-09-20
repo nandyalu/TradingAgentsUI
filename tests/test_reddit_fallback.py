@@ -214,7 +214,8 @@ class TestOneRequestForAllSubreddits:
         # One full page, so a busy subreddit cannot crowd the others out.
         assert calls == [("a+b+c", reddit._FEED_PAGE)]
 
-    def test_posts_are_grouped_back_by_subreddit(self):
+    def test_posts_are_grouped_back_by_subreddit(self, monkeypatch):
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
         posts = [self._post("b", "FROM B"), self._post("a", "FROM A")]
         with patch.object(reddit, "_fetch_subreddit_rss", return_value=posts):
             out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
@@ -233,7 +234,11 @@ class TestOneRequestForAllSubreddits:
         assert "no Reddit posts found" in out
         assert "unavailable" not in out
 
-    def test_subreddit_with_no_posts_is_listed_when_others_have_some(self):
+    def test_subreddit_with_no_posts_is_listed_when_others_have_some(self, monkeypatch):
+        """Only when the subreddits themselves were searched. A custom feed
+        holds what its owner put in it, so a name missing from it was never
+        searched and must not be reported as empty."""
+        monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
         with patch.object(reddit, "_fetch_subreddit_rss", return_value=[self._post("a")]):
             out = reddit.fetch_reddit_posts("NVDA", subreddits=("a", "b"))
         assert "r/b: <no posts found" in out
@@ -263,9 +268,10 @@ def test_each_subreddit_keeps_its_own_quota():
 
 
 @pytest.mark.unit
-def test_empty_subreddit_on_a_full_page_is_not_called_empty():
+def test_empty_subreddit_on_a_full_page_is_not_called_empty(monkeypatch):
     # A full page may have cut a quieter subreddit's posts off, so its absence
     # from the page is not evidence of no posts.
+    monkeypatch.setenv("REDDIT_MULTIREDDIT_URL", "off")
     full = [{"title": f"A{i}", "created_utc": None, "selftext": "", "subreddit": "a"}
             for i in range(reddit._FEED_PAGE)]
     with patch.object(reddit, "_fetch_subreddit_rss", return_value=full):
