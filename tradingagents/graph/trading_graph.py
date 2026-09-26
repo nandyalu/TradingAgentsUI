@@ -469,7 +469,8 @@ class TradingAgentsGraph:
             f"horizon={horizon}",
         ])
 
-    def propagate(self, company_name, trade_date, asset_type: str = "stock", horizon: str = "position"):
+    def propagate(self, company_name, trade_date, asset_type: str = "stock", horizon: str = "position",
+                  on_chunk=None):
         """Run the trading agents graph for a company on a specific date.
 
         ``asset_type`` selects between the stock pipeline (default) and the
@@ -489,6 +490,11 @@ class TradingAgentsGraph:
         ``"position"`` (a hold, multi-month trend) — biases the research
         manager, trader, and portfolio manager toward that holding period
         (see ``get_horizon_instruction``).
+
+        ``on_chunk``, when given, is called with each state the graph streams
+        (``stream_mode="values"``, so every chunk is the whole state so far).
+        It lets a caller show progress while the run is going. An exception it
+        raises stops the run, so a caller can also use it to cancel.
         """
         if horizon not in ("swing", "position"):
             raise ValueError(f"horizon must be 'swing' or 'position', got {horizon!r}")
@@ -503,7 +509,7 @@ class TradingAgentsGraph:
         ) as thread_id_value:
             return self._run_graph(
                 company_name, trade_date, asset_type=asset_type, horizon=horizon,
-                checkpoint_thread_id=thread_id_value,
+                checkpoint_thread_id=thread_id_value, on_chunk=on_chunk,
             )
 
     def begin_checkpoint(
@@ -594,7 +600,8 @@ class TradingAgentsGraph:
         return write_report_tree(final_state, ticker, save_path)
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
-                   horizon: str = "position", checkpoint_thread_id: str | None = None):
+                   horizon: str = "position", checkpoint_thread_id: str | None = None,
+                   on_chunk=None):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents. On a
@@ -612,7 +619,9 @@ class TradingAgentsGraph:
             instrument_context=instrument_context,
             horizon=horizon,
         )
-        args = self.propagator.get_graph_args()
+        # Graph-level callbacks also see tool runs and the analysts' subgraph
+        # messages, which the LLM-level callbacks and the state stream do not.
+        args = self.propagator.get_graph_args(callbacks=self.callbacks or None)
 
         # Inject the checkpoint thread_id (from checkpoint_scope) so the same
         # ticker+date+graph-shape resumes; a different one starts fresh (#1089).
@@ -621,7 +630,12 @@ class TradingAgentsGraph:
 
         # None resumes an existing checkpoint; init_agent_state starts fresh (#1249).
         graph_input = self.checkpoint_input(init_agent_state)
-        if self.debug:
+        if on_chunk is not None:
+            final_state = {}
+            for chunk in self.graph.stream(graph_input, **args):
+                on_chunk(chunk)
+                final_state.update(chunk)
+        elif self.debug:
             trace = []
             last_printed = None
             for chunk in self.graph.stream(graph_input, **args):
