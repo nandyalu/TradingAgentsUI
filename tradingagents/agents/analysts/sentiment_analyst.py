@@ -45,6 +45,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.dataflows import news_sources
 from tradingagents.dataflows.reddit import fetch_reddit_posts
 from tradingagents.dataflows.stocktwits import fetch_stocktwits_messages
 from tradingagents.dataflows.web_search import web_search_financial
@@ -90,6 +91,14 @@ def create_sentiment_analyst(llm):
             news_block = news_future.result()
             stocktwits_block = stocktwits_future.result()
             reddit_block = reddit_future.result()
+
+        # A laya grade on each post, when LAYA_URL is set (news_sources.annotate).
+        # The news block already explains the grades when it carries any, so
+        # the explanation is added here only when it does not.
+        stocktwits_block = news_sources.annotate(stocktwits_block, ticker)
+        reddit_block = news_sources.annotate(reddit_block, ticker)
+        if news_sources.GRADE_LEGEND not in news_block:
+            stocktwits_block = news_sources.with_legend(stocktwits_block)
 
         # If primary social sources are unavailable, supplement with web search.
         # Must run before _build_system_message — it needs web_block's value.
