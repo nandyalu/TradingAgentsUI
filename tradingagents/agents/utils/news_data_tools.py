@@ -2,6 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows import news_sources
 from tradingagents.dataflows.interface import route_to_vendor
 
 
@@ -13,7 +14,8 @@ def get_news(
 ) -> str:
     """
     Retrieve news data for a given ticker symbol.
-    Uses the configured news_data vendor.
+    Uses the configured news_data vendor, then Google News, Finnhub company
+    news (when a key is set) and the company's SEC 8-K filings.
     Args:
         ticker (str): Ticker symbol
         start_date (str): Start date in yyyy-mm-dd format
@@ -21,7 +23,13 @@ def get_news(
     Returns:
         str: A formatted string containing news data
     """
-    return route_to_vendor("get_news", ticker, start_date, end_date)
+    try:
+        yahoo = route_to_vendor("get_news", ticker, start_date, end_date)
+    except Exception as exc:
+        # The other sources still have something to say, so Yahoo's failure
+        # becomes one line in the result instead of the whole result.
+        yahoo = f"## {ticker} News\n\n<unavailable: {exc}>"
+    return news_sources.with_extra(yahoo, ticker, start_date, end_date)
 
 @tool
 def get_global_news(
