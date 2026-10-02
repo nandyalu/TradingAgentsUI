@@ -1,8 +1,7 @@
+from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from tradingagents.agents.utils.tool_call_recovery import (
-    invoke_with_tool_call_recovery,
-)
+from tradingagents.agents.analysts.market_analyst import _fetch
 from tradingagents.agents.utils.agent_utils import (
     get_balance_sheet,
     get_cashflow,
@@ -11,25 +10,33 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.agents.utils.structured import NO_EXTERNAL_TOOLS
+
+
+def fetch_fundamentals_data(ticker: str, trade_date: str) -> str:
+    """The analyst called these four tools in almost every run, one model round
+    each, so they are fetched before its one model call."""
+    blocks = {
+        "company_overview": _fetch(get_fundamentals, ticker=ticker, curr_date=trade_date),
+        "balance_sheet": _fetch(get_balance_sheet, ticker=ticker, freq="quarterly", curr_date=trade_date),
+        "cash_flow": _fetch(get_cashflow, ticker=ticker, freq="quarterly", curr_date=trade_date),
+        "income_statement": _fetch(get_income_statement, ticker=ticker, freq="quarterly", curr_date=trade_date),
+    }
+    return "\n\n".join(f"<start_of_{k}>\n{v}\n<end_of_{k}>" for k, v in blocks.items())
 
 
 def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
-
-        tools = [
-            get_fundamentals,
-            get_balance_sheet,
-            get_cashflow,
-            get_income_statement,
-        ]
+        data = fetch_fundamentals_data(state["company_of_interest"], current_date)
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Make sure to include as much detail as possible. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
-            + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements."
+            + " The data below was collected for you: a company overview and the quarterly balance sheet, cash flow and income statements. If a block is marked unavailable, say so and do not fill it in."
             + get_language_instruction()
+            + "\n\n" + data
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -37,36 +44,23 @@ def create_fundamentals_analyst(llm):
                 (
                     "system",
                     "You are a helpful AI assistant, collaborating with other assistants."
-                    " Use the provided tools to progress towards answering the question."
-                    " If you are unable to fully answer, that's OK; another assistant with different tools"
-                    " will help where you left off. Execute what you can to make progress."
-                    " Report what your tools support; another agent decides the trade."
-                    " You have access to the following tools: {tool_names}."
-                    " Today's date is {current_date}; treat it as 'now' for all analysis and tool-call date ranges. {instrument_context}\n"
-                    "{system_message}",
+                    " Report what the data supports; another agent decides the trade."
+                    " Today's date is {current_date}; treat it as 'now' for all analysis. {instrument_context}"
+                    " " + NO_EXTERNAL_TOOLS +
+                    "\n{system_message}",
                 ),
                 MessagesPlaceholder(variable_name="messages"),
             ]
         )
 
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        chain = prompt | llm.bind_tools(tools)
-
-        result = invoke_with_tool_call_recovery(
-            chain, state["messages"], [t.name for t in tools], "Fundamentals Analyst",
-        )
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
+        report = (prompt | llm).invoke({"messages": state["messages"]}).content
 
         return {
-            "messages": [result],
+            "messages": [AIMessage(content=report)],
             "fundamentals_report": report,
         }
 
