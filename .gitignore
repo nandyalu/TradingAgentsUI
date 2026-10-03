@@ -221,3 +221,7 @@ __marimo__/
 # Enterprise env file (secrets) and generated run reports
 .env.enterprise
 reports/
+
+# Local run artifacts: the default TRADINGAGENTS cache/logs/memory land here
+# when tests or a bare run use the built-in ~/.tradingagents fallback.
+data/
