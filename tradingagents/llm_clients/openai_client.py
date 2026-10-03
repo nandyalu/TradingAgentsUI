@@ -1,5 +1,8 @@
+import json
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -11,6 +14,23 @@ from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
+
+logger = logging.getLogger(__name__)
+
+# At the invoke level we retry only the one transient failure the OpenAI SDK
+# does NOT: a successful 2xx whose application/json body fails to decode
+# (json.JSONDecodeError). The SDK already retries the connection / timeout /
+# 5xx / 429 family internally (up to max_retries) but parses the body only
+# once, after that retry loop — so a truncated or garbled body would otherwise
+# propagate out of a node and abort the whole graph run (checkpointing bounds
+# the loss, it doesn't prevent the crash). The HTTP-transient family is left to
+# the SDK so retries aren't multiplied, and permanent 4xx errors (auth, bad
+# request) still fail fast.
+#
+# Not handled here (different layer): a model emitting malformed *structured-
+# output* content surfaces in the downstream parser, outside invoke, and is
+# recovered by the agents' free-text fallback (agents/utils/structured.py).
+_TRANSIENT_LLM_ERRORS: tuple[type[Exception], ...] = (json.JSONDecodeError,)
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
@@ -33,7 +53,23 @@ class NormalizedChatOpenAI(ChatOpenAI):
     """
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        # Retry an undecodable-JSON response body instead of letting it abort the
+        # graph (see _TRANSIENT_LLM_ERRORS). `max_retries` (the ChatOpenAI field,
+        # default 2) bounds the attempts and `timeout` bounds each request; both
+        # come from the `llm_max_retries` / `llm_timeout` config keys (TRADINGAGENTS_LLM_*).
+        attempts = max(self.max_retries or 0, 0) + 1
+        for attempt in range(attempts):
+            try:
+                return normalize_content(super().invoke(input, config, **kwargs))
+            except _TRANSIENT_LLM_ERRORS as exc:
+                if attempt + 1 >= attempts:
+                    raise
+                delay = min(2.0 ** attempt, 8.0)
+                logger.warning(
+                    "transient %s on attempt %d/%d; retrying in %.0fs",
+                    type(exc).__name__, attempt + 1, attempts, delay,
+                )
+                time.sleep(delay)
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         caps = get_capabilities(self.model_name)
@@ -52,17 +88,45 @@ class NormalizedChatOpenAI(ChatOpenAI):
 
 
 class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
-    """OpenAI-compatible client for arbitrary local servers (LM Studio, vLLM,
-    llama.cpp via the generic ``openai_compatible`` provider).
+    """OpenAI-compatible client for local servers: Ollama, LM Studio, vLLM,
+    llama.cpp.
 
     Their tool-calling support varies, and many reject the object-form
     ``tool_choice`` langchain sends for function-calling structured output. Bind
     the schema as a tool but don't force tool_choice, so structured output works
     across local servers regardless of the model ID's capabilities (#1057).
+
+    **Structured output defaults to ``json_schema`` here, not
+    ``function_calling``.** The capability table resolves by model ID, and a
+    local model's ID is whatever someone named the build, so no pattern can
+    recognise one. The client class can: it already knows the endpoint is a
+    local server.
+
+    The difference matters most to small models. On the function-calling path
+    the model has to produce a correctly-named tool call with correctly-typed
+    arguments unaided, and one that answers in prose instead returns nothing to
+    parse — the "structured output returned no parsed result" failure. With
+    ``json_schema`` the server constrains the sampler, so a malformed answer
+    stops being possible rather than becoming less likely. Verified against
+    ollama: a model asked to answer at length in prose returned strict
+    schema-matching JSON.
+
+    This is safe here because the agents on this path bind no external tools.
+    ``bind_structured`` is schema-only, so there is no data-fetching tool for a
+    ``response_format`` to collide with.
+
+    A server that does not support ``response_format`` raises, and
+    ``bind_structured`` already turns that into free-text generation.
     """
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
-        resolved = method or get_capabilities(self.model_name).preferred_structured_method
+        caps = get_capabilities(self.model_name)
+        # An explicit method from the caller wins. A model with a table entry
+        # saying it cannot do json_schema keeps its own preference — that entry
+        # was written from a real API refusal.
+        if method is None and caps.supports_json_schema:
+            method = "json_schema"
+        resolved = method or caps.preferred_structured_method
         if resolved == "function_calling":
             kwargs.setdefault("tool_choice", None)
         return super().with_structured_output(schema, method=method, **kwargs)
@@ -224,6 +288,8 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "kimi":       ProviderSpec(base_url="https://api.moonshot.ai/v1"),
     "groq":       ProviderSpec(base_url="https://api.groq.com/openai/v1"),
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
+    # LocalCompatibleChatOpenAI, so ollama models get json_schema structured
+    # output rather than function calling. See that class for why.
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
                                key_optional=True, placeholder_key="ollama",
                                chat_class=LocalCompatibleChatOpenAI),
