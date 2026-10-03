@@ -76,6 +76,16 @@ def _no_network(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_circuit_breaker():
+    """The router's circuit breaker is module state; one test's failures must not skip a vendor in the next."""
+    from tradingagents.dataflows import router
+
+    router.reset_circuit_breaker()
+    yield
+    router.reset_circuit_breaker()
+
+
+@pytest.fixture(autouse=True)
 def _at_a_terminal(monkeypatch):
     """Tests of the interactive steps run as if at a terminal; pytest's stdin is
     not one. A test of an unattended run sets isatty to False itself."""
