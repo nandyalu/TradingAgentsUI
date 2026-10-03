@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 #
 # Not handled here (different layer): a model emitting malformed *structured-
 # output* content surfaces in the downstream parser, outside invoke, and is
-# recovered by the agents' free-text fallback (agents/utils/structured.py).
+# recovered by the agents' free-text fallback (agents/structured.py).
 _TRANSIENT_LLM_ERRORS: tuple[type[Exception], ...] = (json.JSONDecodeError,)
 
 
