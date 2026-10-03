@@ -9,6 +9,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
+from tradingagents.dataflows import news_sources
 from tradingagents.dataflows.date_window import as_of, as_of_window
 from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
 from tradingagents.dataflows.router import no_data_available, route_to_vendor, vendor_unavailable
@@ -177,7 +178,8 @@ def get_news(
 ) -> str:
     """
     Retrieve news data for the instrument under analysis.
-    Uses the configured news_data vendor.
+    Uses the configured news_data vendor, then Google News, Finnhub company
+    news (when a key is set) and the company's SEC 8-K filings.
     Args:
         start_date (str): Start date in yyyy-mm-dd format
         end_date (str): End date in yyyy-mm-dd format
@@ -188,7 +190,13 @@ def get_news(
         start_date, end_date = as_of_window(start_date, end_date, trade_date)
     except ValueError as e:
         return str(e)
-    return route_to_vendor("get_news", ticker, start_date, end_date)
+    try:
+        yahoo = route_to_vendor("get_news", ticker, start_date, end_date)
+    except Exception as exc:
+        # The other sources still have something to say, so Yahoo's failure
+        # becomes one line in the result instead of the whole result.
+        yahoo = f"## {ticker} News\n\n<unavailable: {exc}>"
+    return news_sources.with_extra(yahoo, ticker, start_date, end_date)
 
 
 @tool
