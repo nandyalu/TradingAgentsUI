@@ -22,7 +22,8 @@ from tradingagents.reporting import write_report_tree
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
 from .propagation import Propagator
-from .setup import GraphSetup
+# _return_error_to_the_model is re-exported: callers import it from here.
+from .setup import GraphSetup, _return_error_to_the_model  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,18 @@ class TradingAgentsGraph:
         self.deep_thinking_llm = create_tier_client(self.config, "deep", **extra).get_llm()
         self.quick_thinking_llm = create_tier_client(self.config, "quick", **extra).get_llm()
 
+        # The news analyst can run on another Google model when search
+        # grounding is on, e.g. a Gemma model with grounding quota while the
+        # rest of the run stays on a Gemini model that has none.
+        grounding_model = self.config.get("google_search_grounding_model")
+        if self.config.get("google_search_grounding") and grounding_model:
+            self.news_analyst_llm = create_llm_client(
+                provider="google",
+                model=grounding_model,
+            ).get_llm()
+        else:
+            self.news_analyst_llm = self.quick_thinking_llm
+
         self.memory_log = TradingMemoryLog(self.config)
 
         self.conditional_logic = ConditionalLogic(
@@ -98,6 +111,8 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.conditional_logic,
             max_tool_rounds,
+            google_search_grounding=self.config.get("google_search_grounding", False),
+            news_analyst_llm=self.news_analyst_llm,
         )
 
         self.propagator = Propagator(
@@ -137,7 +152,7 @@ class TradingAgentsGraph:
         """
         return str(trade_date) if is_historical(trade_date) else None
 
-    def _run_signature(self, asset_type: str, portfolio=None) -> str:
+    def _run_signature(self, asset_type: str, portfolio=None, horizon: str = "position") -> str:
         """Run inputs that must invalidate a checkpoint if changed.
 
         Keyed into the checkpoint thread ID so a resume under a different analyst
@@ -154,6 +169,9 @@ class TradingAgentsGraph:
             f"debate={self.config['max_debate_rounds']}",
             f"risk={self.config['max_risk_discuss_rounds']}",
             f"asset={asset_type}",
+            # A horizon change flips the research, trader and PM prompts, so a
+            # checkpoint saved under the other horizon must not resume.
+            f"horizon={horizon}",
             # None, an empty book and a changed book are three different runs.
             f"portfolio={portfolio.fingerprint() if portfolio is not None else 'none'}",
             # The layout itself: a checkpoint saved when analysts ran one after
@@ -164,7 +182,8 @@ class TradingAgentsGraph:
             f"settings={digest}",
         ])
 
-    def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
+    def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio=None,
+                  horizon: str = "position", on_chunk=None):
         """Run the trading agents graph for a company on a specific date.
 
         ``asset_type`` selects between the stock pipeline (default) and the
@@ -179,17 +198,32 @@ class TradingAgentsGraph:
         when the decision had no parseable rating (#1170); guard with
         ``tradingagents.agents.rating.is_review`` before mapping it to the
         PortfolioRating enum.
+
+        ``horizon`` is ``"swing"`` (a quick trade, a few days) or
+        ``"position"`` (a hold, multi-month trend). It biases the research
+        manager, trader and portfolio manager toward that holding period
+        (see ``get_horizon_instruction``).
+
+        ``on_chunk``, when given, is called with each state the graph streams
+        (``stream_mode="values"``, so every chunk is the whole state so far).
+        It lets a caller show progress while the run is going. An exception it
+        raises stops the run, so a caller can also use it to cancel.
         """
         trade_date = _validate_trade_date(trade_date)
+        if horizon not in ("swing", "position"):
+            raise ValueError(f"horizon must be 'swing' or 'position', got {horizon!r}")
 
         with run_config(self.config), \
-                self.checkpoint_scope(company_name, trade_date, asset_type, portfolio) as thread_id_value:
+                self.checkpoint_scope(company_name, trade_date, asset_type, portfolio,
+                                      horizon) as thread_id_value:
             return self._run_graph(
                 company_name, trade_date, asset_type=asset_type,
                 checkpoint_thread_id=thread_id_value, portfolio=portfolio,
+                horizon=horizon, on_chunk=on_chunk,
             )
 
-    def begin_checkpoint(self, company_name, trade_date, asset_type: str = "stock", portfolio=None) -> str | None:
+    def begin_checkpoint(self, company_name, trade_date, asset_type: str = "stock", portfolio=None,
+                         horizon: str = "position") -> str | None:
         """Recompile the graph with a per-ticker checkpointer and return the
         ``thread_id`` to inject into the stream/invoke ``config`` (or ``None``
         when checkpointing is disabled).
@@ -203,7 +237,7 @@ class TradingAgentsGraph:
         self._resuming = False
         if not self.config.get("checkpoint_enabled"):
             return None
-        signature = self._run_signature(asset_type, portfolio)
+        signature = self._run_signature(asset_type, portfolio, horizon)
         self._checkpointer_ctx = get_checkpointer(self.config["data_cache_dir"], company_name)
         saver = self._checkpointer_ctx.__enter__()
         self.graph = self.workflow.compile(checkpointer=saver)
@@ -237,19 +271,21 @@ class TradingAgentsGraph:
         self._resuming = False
 
     @contextmanager
-    def checkpoint_scope(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
+    def checkpoint_scope(self, company_name, trade_date, asset_type: str = "stock", portfolio=None,
+                         horizon: str = "position"):
         """Context-manager form of begin/end_checkpoint for the propagate path."""
         try:
-            yield self.begin_checkpoint(company_name, trade_date, asset_type, portfolio)
+            yield self.begin_checkpoint(company_name, trade_date, asset_type, portfolio, horizon)
         finally:
             self.end_checkpoint()
 
-    def clear_checkpoint_on_success(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
+    def clear_checkpoint_on_success(self, company_name, trade_date, asset_type: str = "stock", portfolio=None,
+                                    horizon: str = "position"):
         """Drop a completed run's checkpoint so a later run starts fresh (#1249)."""
         if self.config.get("checkpoint_enabled"):
             clear_checkpoint(
                 self.config["data_cache_dir"], company_name, str(trade_date),
-                self._run_signature(asset_type, portfolio),
+                self._run_signature(asset_type, portfolio, horizon),
             )
 
     def run_settings(self) -> dict:
@@ -290,7 +326,8 @@ class TradingAgentsGraph:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return Path(self.config["results_dir"]) / "reports" / f"{safe_ticker_component(ticker)}_{stamp}"
 
-    def create_run_state(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
+    def create_run_state(self, company_name, trade_date, asset_type: str = "stock", portfolio=None,
+                         horizon: str = "position"):
         """Build a run's initial state; propagate() and the CLI both start here.
 
         Injects the resolved instrument identity for every agent (#814). The
@@ -303,6 +340,7 @@ class TradingAgentsGraph:
             asset_type=asset_type,
             instrument_context=self.resolve_instrument_context(company_name, asset_type, trade_date),
             portfolio_context=portfolio.render(company_name) if portfolio is not None else "",
+            horizon=horizon,
         )
 
     def _memory_step(self, state):
@@ -370,10 +408,11 @@ class TradingAgentsGraph:
         )
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
-                   checkpoint_thread_id: str | None = None, portfolio=None):
+                   checkpoint_thread_id: str | None = None, portfolio=None,
+                   horizon: str = "position", on_chunk=None):
         """Execute the graph and write the resulting state to disk and memory log."""
-        init_agent_state = self.create_run_state(company_name, trade_date, asset_type, portfolio)
-        args = self.propagator.get_graph_args()
+        init_agent_state = self.create_run_state(company_name, trade_date, asset_type, portfolio, horizon)
+        args = self.propagator.get_graph_args(callbacks=getattr(self, "callbacks", None) or None)
 
         # Inject the checkpoint thread_id (from checkpoint_scope) so the same
         # ticker+date+graph-shape resumes; a different one starts fresh (#1089).
@@ -382,7 +421,12 @@ class TradingAgentsGraph:
 
         # None resumes an existing checkpoint; init_agent_state starts fresh (#1249).
         graph_input = self.checkpoint_input(init_agent_state)
-        if self.debug:
+        if on_chunk is not None:
+            final_state = {}
+            for chunk in self.graph.stream(graph_input, **args):
+                on_chunk(chunk)
+                final_state.update(chunk)
+        elif self.debug:
             # A state repeats the messages before it, so each prints once (#1027).
             final_state, printed = {}, set()
             for messages, state in self.stream_run(graph_input, **args):
@@ -399,7 +443,7 @@ class TradingAgentsGraph:
         self.record_decision(company_name, trade_date, final_state)
 
         # Clear checkpoint on successful completion to avoid stale state.
-        self.clear_checkpoint_on_success(company_name, trade_date, asset_type, portfolio)
+        self.clear_checkpoint_on_success(company_name, trade_date, asset_type, portfolio, horizon)
 
         return final_state, run_rating(final_state)
 

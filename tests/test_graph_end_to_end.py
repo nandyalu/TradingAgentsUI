@@ -34,7 +34,8 @@ TEXT = "Report.\n\n**Rating**: Overweight\n\nFINAL TRANSACTION PROPOSAL: **BUY**
 STRUCTURED = {
     schemas.ResearchPlan: schemas.ResearchPlan(
         recommendation=schemas.PortfolioRating.OVERWEIGHT, rationale="r", strategic_actions="a"),
-    schemas.TraderProposal: schemas.TraderProposal(action=schemas.TraderAction.BUY, reasoning="r"),
+    schemas.TraderProposal: schemas.TraderProposal(
+        action=schemas.TraderAction.BUY, reasoning="r", bull_case="b", bear_case="x", win_probability=0.6),
     # The thesis quotes another party's rating; the decision is still the PM's own.
     schemas.PortfolioDecision: schemas.PortfolioDecision(
         rating=schemas.PortfolioRating.OVERWEIGHT, executive_summary="s",
@@ -54,6 +55,8 @@ class ScriptedModel(BaseChatModel):
     tools: tuple = ()
     calls: list = Field(default_factory=list)   # shared across bound copies
     threads: set = Field(default_factory=set)   # threads that served a tool-bound call
+    active: list = Field(default_factory=list)  # calls in flight now
+    peak: list = Field(default_factory=list)    # calls in flight as each call started
     fail_at: int | None = None                  # raise on this call, once
 
     @property
@@ -74,12 +77,17 @@ class ScriptedModel(BaseChatModel):
             raise RuntimeError("provider unavailable")
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        import threading
+        import time
         self._count()
         if self.tools:
-            import threading
-            import time
             self.threads.add(threading.current_thread().name)
-            time.sleep(0.05)   # long enough for concurrent analysts to overlap
+        # Every call sleeps, so analysts that run at the same time overlap. In
+        # this fork three of the four analysts call the model without tools.
+        self.active.append(1)
+        self.peak.append(len(self.active))
+        time.sleep(0.05)
+        self.active.pop()
         if self.tools and not isinstance(messages[-1], ToolMessage):
             calls = [{"name": t.name, "id": f"call_{i}",
                       "args": {k: v for k, v in ARGS.items()
@@ -141,8 +149,9 @@ def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, st
         assert state[key].strip(), key
     tool_methods = {"get_stock_data", "get_indicators", "get_news", "get_global_news",
                     "get_macro_indicators", "get_prediction_markets", "get_fundamentals",
-                    "get_balance_sheet", "get_cashflow", "get_income_statement",
-                    "get_insider_transactions", "ohlcv"}
+                    "get_balance_sheet", "get_cashflow", "get_income_statement", "ohlcv"}
+    # This fork's fundamentals analyst fetches four blocks before its one model
+    # call, without insider transactions; no analyst here fetches them.
     assert offline == tool_methods
     assert [e["rating"] for e in graph.memory_log.load_entries()] == ["Overweight"]
 
@@ -186,7 +195,7 @@ def test_the_analysts_run_at_the_same_time(tmp_path, monkeypatch, offline):
     assert not [n for n in graph.graph.get_graph().nodes if n.startswith("Msg Clear")]
     graph.propagate("NVDA", TRADE_DATE)
 
-    assert len(model.threads) > 1
+    assert max(model.peak) > 1
 
 
 @pytest.mark.unit
@@ -199,7 +208,8 @@ def test_a_debug_run_prints_the_analysts_work_and_reaches_the_same_decision(tmp_
     assert signal == "Overweight"
     assert state["market_report"].strip() and state["fundamentals_report"].strip()
     printed = capsys.readouterr().out
-    assert "get_stock_data" in printed and "get_balance_sheet" in printed
+    # The news analyst is the one analyst here that calls tools.
+    assert "get_news" in printed
 
 
 @pytest.mark.unit
@@ -261,7 +271,7 @@ def test_an_analyst_that_keeps_calling_tools_writes_its_report_at_the_limit(tmp_
 
     final_state, rating = graph.propagate("NVDA", TRADE_DATE)
 
-    assert len(model.tool_turns) == 3 * 3   # three tool-using analysts, three rounds each
+    assert len(model.tool_turns) == 1 * 3   # one tool-using analyst in this fork, three rounds
     for key in ("market_report", "news_report", "fundamentals_report"):
         assert final_state[key] == TEXT
     assert rating == "Overweight"
@@ -277,7 +287,7 @@ def test_the_last_turn_is_offered_no_tools_and_reads_its_tool_results_as_text(tm
     graph.propagate("NVDA", TRADE_DATE)
 
     wrap_ups = [h for h in model.last_turns if isinstance(h[-1], HumanMessage) and "tool round" in h[-1].content]
-    assert len(wrap_ups) == 3
+    assert len(wrap_ups) == 1   # the news analyst, the one analyst here with tools
     for history in wrap_ups:
         assert not any(isinstance(m, ToolMessage) or getattr(m, "tool_calls", None) for m in history)
         assert any("returned]" in str(m.content) for m in history)

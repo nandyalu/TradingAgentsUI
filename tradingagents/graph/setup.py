@@ -45,6 +45,29 @@ RISK_ANALYSIS_PATH_MAP = {
 }
 
 
+def _return_error_to_the_model(exc: Exception) -> str:
+    """What a tool node hands back when a tool raises.
+
+    **A tool error is a message to the model, not the end of the analysis.**
+    By default a raising tool kills the graph, and on 2026-09-02 that discarded
+    two complete forty-minute analyses: the model had asked for an indicator
+    called ``macd_histogram`` when the real name is ``macdh``, and the error
+    naming every valid indicator went to the logs instead of to the model that
+    could have acted on it.
+
+    Handing the message back is how a tool-calling model is meant to recover.
+    It reads what went wrong and calls again, which is one extra call against
+    an analysis of about twenty.
+
+    **Only the message, and never a suggestion of what to do instead.** A model
+    told "that failed, try something else" invents a plausible substitute, and
+    an invented answer that reads as data is the exact failure that
+    disqualified four models in August. The vendor's own message already names
+    the valid values where they exist; anything beyond it is us guessing.
+    """
+    return f"TOOL ERROR: {type(exc).__name__}: {exc}"
+
+
 def _tools_or_done(state) -> str:
     """Route an analyst's turn: run its tool calls, or finish with its report."""
     return "tools" if state["messages"][-1].tool_calls else END
@@ -82,7 +105,7 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
                        spec.agent_node, max_tool_rounds, repeated)
         return agent({**state, "messages": [*state["messages"], HumanMessage(WRAP_UP)]})
 
-    graph.add_node("tools", ToolNode(list(spec.tools)))
+    graph.add_node("tools", ToolNode(list(spec.tools), handle_tool_errors=_return_error_to_the_model))
     graph.add_node("wrap_up", wrap_up)
     graph.add_conditional_edges("agent", _tools_or_done, ["tools", END])
     graph.add_conditional_edges("tools", more_or_wrap_up, ["agent", "wrap_up"])
@@ -99,12 +122,18 @@ class GraphSetup:
         deep_thinking_llm: Any,
         conditional_logic: ConditionalLogic,
         max_tool_rounds: int,
+        google_search_grounding: bool = False,
+        news_analyst_llm: Any = None,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
         self.conditional_logic = conditional_logic
         self.max_tool_rounds = max_tool_rounds
+        self.google_search_grounding = google_search_grounding
+        # Falls back to quick_thinking_llm when no override was built
+        # (see TradingAgentsGraph.__init__ for when one is).
+        self.news_analyst_llm = news_analyst_llm or quick_thinking_llm
 
     def setup_graph(
         self, selected_analysts=("market", "social", "news", "fundamentals"), memory_node=None
@@ -125,7 +154,10 @@ class GraphSetup:
         analyst_factories = {
             "market": lambda: create_market_analyst(self.quick_thinking_llm),
             "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
-            "news": lambda: create_news_analyst(self.quick_thinking_llm),
+            "news": lambda: create_news_analyst(
+                self.news_analyst_llm,
+                google_search_grounding=self.google_search_grounding,
+            ),
             "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),
         }
 

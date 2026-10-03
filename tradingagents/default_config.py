@@ -29,8 +29,11 @@ _ENV_OVERRIDES = {
     # default). Settable here for non-interactive runs; the CLI also offers an
     # interactive choice, which is skipped when the matching var is set.
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
+    "TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING": "google_search_grounding",
+    "TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING_MODEL": "google_search_grounding_model",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
 }
 
 
@@ -107,6 +110,17 @@ def build_default_config() -> dict:
         "deep_think_backend_url": None,
         # Provider-specific thinking configuration
         "google_thinking_level": None,      # "high", "minimal", etc.
+        # News analyst attaches Google's built-in search-grounding tool when the
+        # LLM is Gemini. Off by default: grounding needs a Google Cloud project
+        # with billing linked (Tier 1) -- on the Free tier, Gemini 3 gets zero
+        # grounding quota, so every run fails with 429 RESOURCE_EXHAUSTED.
+        # Confirmed live 2026-09-17. Env: TRADINGAGENTS_GOOGLE_SEARCH_GROUNDING.
+        "google_search_grounding": False,
+        # Override: run the news analyst on a different Google model when
+        # grounding is on (e.g. a Gemma model with open grounding quota, instead
+        # of a Gemini 3 model that may have none -- see google_search_grounding
+        # above). None reuses quick_think_llm, unchanged.
+        "google_search_grounding_model": None,
         "openai_reasoning_effort": None,    # "medium", "high", "low"
         "anthropic_effort": None,           # "high", "medium", "low"
         # Sampling temperature, forwarded to every provider when set. None leaves
@@ -123,6 +137,10 @@ def build_default_config() -> dict:
         # unbounded reasoning/output and hangs or trips a gateway idle timeout
         # (e.g. some deepseek-v4-flash deployments, #1204).
         "max_tokens": None,
+        # Seconds each LLM request may take (TRADINGAGENTS_LLM_TIMEOUT). None leaves
+        # the SDK default. llm_max_retries also bounds NormalizedChatOpenAI's retry
+        # of an undecodable JSON body.
+        "llm_timeout": None,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,
