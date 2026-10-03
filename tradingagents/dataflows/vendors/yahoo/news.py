@@ -142,46 +142,80 @@ def get_global_news_yfinance(
     start_dt = curr_dt - relativedelta(days=look_back_days)
     start_date = start_dt.strftime("%Y-%m-%d")
 
-    in_window_news = []
+    # One bucket per query, then a round-robin across them. Filling a single
+    # list and stopping at ``limit`` looks equivalent and is not: the first
+    # query alone returns about ten articles, so the loop used to break before
+    # the later queries ever ran. With the shipped configuration that meant
+    # "geopolitical risk trade war sanctions", the central-bank query and the
+    # commodities query were never fetched at all, and macro news was Federal
+    # Reserve headlines wearing the name of something broader.
+    #
+    # Each query is still asked for ``limit`` articles rather than its share.
+    # It is the same single request either way, and the headroom matters
+    # because the window filter below discards some of what comes back.
+    buckets: list[list[dict]] = []
     seen_titles = set()
+    failure: Exception | None = None
+    failures = 0
 
     for query in search_queries:
-        found = yf_retry(lambda q=query: yf.Search(
-            query=q,
-            news_count=limit,
-            enable_fuzzy_query=True,
-        ).news)
+        try:
+            found = yf_retry(lambda q=query: yf.Search(
+                query=q,
+                news_count=limit,
+                enable_fuzzy_query=True,
+            ).news)
+        except Exception as exc:
+            # One failing query must not cost every other topic. A macro report
+            # missing commodities is worth more than no macro report at all.
+            failure, failures = exc, failures + 1
+            continue
 
+        bucket: list[dict] = []
         for article in found or []:
             # Window first: the limit counts what the run may read, so an
-            # out-of-window article must not spend the budget or cut the
-            # remaining searches short (#1356). Flat articles are filtered
-            # on the same rule, so none can leak future news (#1007).
+            # out-of-window article must not spend the budget (#1356). Flat
+            # articles are filtered on the same rule, so none can leak future
+            # news (#1007).
             data = _extract_article_data(article)
+            title = data["title"]
+            if not title or title in seen_titles:
+                continue
             if not in_window(data["pub_date"], start_dt, curr_dt):
                 continue
-            if data["title"] and data["title"] not in seen_titles:
-                seen_titles.add(data["title"])
-                in_window_news.append(data)
+            seen_titles.add(title)
+            bucket.append(data)
+        buckets.append(bucket)
 
-        if len(in_window_news) >= limit:
+    if failure is not None and failures == len(search_queries):
+        # Every request failed: a fact about the vendor, not about the market.
+        # Raised as yf_retry raised it, so the router reports the vendor as
+        # unavailable rather than the news as absent.
+        raise failure
+
+    selected: list[dict] = []
+    for rank in range(max((len(b) for b in buckets), default=0)):
+        for bucket in buckets:
+            if rank < len(bucket):
+                selected.append(bucket[rank])
+                if len(selected) >= limit:
+                    break
+        if len(selected) >= limit:
             break
 
+    if not selected:
+        # Results merge several fuzzy searches, so their timestamps prove no
+        # continuous coverage; judge the window against the present only.
+        gap = coverage_gap((), start_date, as_of_date, "Yahoo Finance global news", "market news")
+        return gap or f"No global news found between {start_date} and {as_of_date}"
+
     news_str = ""
-    for data in in_window_news[:limit]:
+    for data in selected:
         news_str += f"### {data['title']} (source: {data['publisher']})\n"
         if data["summary"]:
             news_str += f"{data['summary']}\n"
         if data["link"]:
             news_str += f"Link: {data['link']}\n"
         news_str += "\n"
-
-    # Nothing fell inside the window -> say so rather than return an
-    # empty-bodied report (#993).
-    if not news_str:
-        # Results merge several fuzzy searches, so their timestamps prove no
-        # continuous coverage; judge the window against the present only.
-        gap = coverage_gap((), start_date, as_of_date, "Yahoo Finance global news", "market news")
-        return gap or f"No global news found between {start_date} and {as_of_date}"
 
     return f"## Global Market News, from {start_date} to {as_of_date}:\n\n{news_str}"
