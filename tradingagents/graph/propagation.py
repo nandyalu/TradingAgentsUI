@@ -18,6 +18,7 @@ class Propagator:
         past_context: str = "",
         instrument_context: str = "",
         portfolio_context: str = "",
+        horizon: str = "position",
     ) -> dict[str, Any]:
         """Create the initial state for the agent graph.
 
@@ -26,6 +27,11 @@ class Propagator:
         ``TradingAgentsGraph.resolve_instrument_context``). When empty, agents
         fall back to ticker-only context via
         ``get_instrument_context_from_state``.
+
+        ``horizon`` is ``"swing"`` (a few days) or ``"position"`` (a
+        multi-month hold) — read by the research manager, trader, and
+        portfolio manager prompts via ``get_horizon_instruction`` to bias
+        the debate toward the requested holding period.
         """
         return {
             "messages": [("human", company_name)],
@@ -33,6 +39,7 @@ class Propagator:
             "asset_type": asset_type,
             "instrument_context": instrument_context,
             "trade_date": str(trade_date),
+            "horizon": horizon,
             "past_context": past_context,
             "portfolio_context": portfolio_context,
             "investment_debate_state": InvestDebateState(
