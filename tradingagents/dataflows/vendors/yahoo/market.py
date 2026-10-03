@@ -7,7 +7,7 @@ import yfinance as yf
 from dateutil.relativedelta import relativedelta
 from stockstats import wrap
 
-from tradingagents.dataflows.errors import NoMarketDataError, VendorError
+from tradingagents.dataflows.errors import BadVendorArgumentError, NoMarketDataError, VendorError
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.common import raise_for_empty, yf_retry
 from tradingagents.dataflows.vendors.yahoo.ohlcv import _assert_ohlcv_not_stale, load_ohlcv
@@ -148,8 +148,15 @@ def get_stock_stats_indicators_window(
     }
 
     if indicator not in best_ind_params:
-        raise ValueError(
-            f"Indicator {indicator} is not supported. Please choose from: {list(best_ind_params.keys())}"
+        # BadVendorArgumentError, not ValueError: this vendor is healthy and the
+        # request was wrong. Raising a plain ValueError made the router count it
+        # as vendor ill-health, which opened yfinance's circuit breaker after
+        # three bad names and then failed every *valid* indicator call for the
+        # next five minutes. See the class docstring.
+        raise BadVendorArgumentError(
+            f"Indicator {indicator} is not supported. "
+            f"Please choose from: {list(best_ind_params.keys())}",
+            valid=list(best_ind_params.keys()),
         )
 
     end_date = as_of_date
