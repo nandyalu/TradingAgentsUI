@@ -27,6 +27,7 @@ from tradingagents.agents.schemas import (
     render_research_plan,
     render_sentiment_report,
     render_trader_proposal,
+    resolve_levels,
 )
 from tradingagents.agents.trader.trader import create_trader
 
@@ -38,10 +39,20 @@ from tradingagents.agents.trader.trader import create_trader
 @pytest.mark.unit
 class TestRenderTraderProposal:
     def test_minimal_required_fields(self):
-        p = TraderProposal(action=TraderAction.HOLD, reasoning="Balanced setup; no edge.")
+        p = TraderProposal(
+            action=TraderAction.HOLD,
+            reasoning="Balanced setup; no edge.",
+            bull_case="Margins resilient.",
+            bear_case="Cash flow deteriorating.",
+            win_probability=50,
+        )
         md = render_trader_proposal(p)
         assert "**Action**: Hold" in md
         assert "**Reasoning**: Balanced setup; no edge." in md
+        # Bull/bear cases and the probability review are always present.
+        assert "**Bull Case**: Margins resilient." in md
+        assert "**Bear Case**: Cash flow deteriorating." in md
+        assert "**Win Probability**: 50%" in md
         # The trailing FINAL TRANSACTION PROPOSAL line is preserved for the
         # analyst stop-signal text and any external code that greps for it.
         assert "FINAL TRANSACTION PROPOSAL: **HOLD**" in md
@@ -50,25 +61,75 @@ class TestRenderTraderProposal:
         p = TraderProposal(
             action=TraderAction.BUY,
             reasoning="Strong technicals + fundamentals.",
-            entry_price=189.5,
-            stop_loss=178.0,
+            bull_case="Breakout on volume.",
+            bear_case="Valuation stretched.",
+            win_probability=62,
+            stop_atr_multiple=2.0,
+            target_r_multiple=2.0,
             position_sizing="6% of portfolio",
         )
-        md = render_trader_proposal(p)
+        # The model states distances; Python turns them into prices. Close 189.5
+        # with ATR 5.75 puts the stop 11.5 below at 178.0, and a 2R target 23.0
+        # above at 212.5 — the same levels this test used to hand in directly.
+        md = render_trader_proposal(p, resolve_levels(p, {"close": 189.5, "atr": 5.75}))
         assert "**Action**: Buy" in md
         assert "**Entry Price**: 189.5" in md
         assert "**Stop Loss**: 178.0" in md
         assert "**Position Sizing**: 6% of portfolio" in md
+        # Risk/reward is computed deterministically: reward 23.0 / risk 11.5 = 2.00.
+        assert "**Risk/Reward Ratio**: 2.00 : 1" in md
+        assert "**Expected Value**:" in md
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in md
 
-    def test_optional_fields_are_named_as_not_provided(self):
-        """An omitted line reads as a field nobody asked for; the reader cannot
-        tell it from a level the trader declined to set."""
-        p = TraderProposal(action=TraderAction.SELL, reasoning="Guidance cut.")
+    def test_optional_fields_omitted_when_absent(self):
+        p = TraderProposal(
+            action=TraderAction.SELL,
+            reasoning="Guidance cut.",
+            bull_case="Oversold bounce possible.",
+            bear_case="Demand collapsing.",
+            win_probability=58,
+        )
         md = render_trader_proposal(p)
-        for field in ("Entry Price", "Stop Loss", "Position Sizing"):
-            assert f"**{field}**: not provided" in md
+        assert "Entry Price" not in md
+        assert "Stop Loss" not in md
+        assert "Position Sizing" not in md
+        # Without price levels the R/R is reported as not-applicable.
+        assert "**Risk/Reward Ratio**: n/a" in md
         assert "FINAL TRANSACTION PROPOSAL: **SELL**" in md
+
+    def test_risk_reward_math_is_deterministic(self):
+        # entry 100, stop 90, target 130 -> reward 30 / risk 10 = 3.00 R/R.
+        # win prob 60% -> EV = 0.6*3 - 0.4 = 1.40R; breakeven = 100/(1+3) = 25%.
+        p = TraderProposal(
+            action=TraderAction.BUY,
+            reasoning="Clean breakout.",
+            bull_case="Trend + volume.",
+            bear_case="Thin liquidity.",
+            win_probability=60,
+            stop_atr_multiple=2.0,
+            target_r_multiple=3.0,
+        )
+        md = render_trader_proposal(p, resolve_levels(p, {"close": 100.0, "atr": 5.0}))
+        assert "**Risk/Reward Ratio**: 3.00 : 1" in md
+        assert "**Expected Value**: +1.40R (favorable)" in md
+        assert "**Breakeven Win-Rate**: 25%" in md
+        assert "above breakeven" in md
+
+    def test_negative_expected_value_flagged(self):
+        # Low win prob below breakeven -> unfavorable EV.
+        # entry 100, stop 90, target 110 -> R/R 1.00, breakeven 50%; prob 35% < 50%.
+        p = TraderProposal(
+            action=TraderAction.BUY,
+            reasoning="Marginal setup.",
+            bull_case="Possible bounce.",
+            bear_case="Downtrend intact.",
+            win_probability=35,
+            stop_atr_multiple=2.0,
+            target_r_multiple=1.0,
+        )
+        md = render_trader_proposal(p, resolve_levels(p, {"close": 100.0, "atr": 5.0}))
+        assert "(unfavorable)" in md
+        assert "below breakeven" in md
 
 
 @pytest.mark.unit
@@ -81,15 +142,25 @@ class TestNullishFloatCoercion:
             p = TraderProposal(
                 action=TraderAction.HOLD,
                 reasoning="x",
-                entry_price=sentinel,
-                stop_loss=sentinel,
+                bull_case="b",
+                bear_case="c",
+                win_probability=50,
+                stop_atr_multiple=sentinel,
+                target_r_multiple=sentinel,
             )
-            assert p.entry_price is None
-            assert p.stop_loss is None
+            assert p.stop_atr_multiple is None
+            assert p.target_r_multiple is None
 
     def test_trader_real_numeric_string_still_parses(self):
-        p = TraderProposal(action=TraderAction.BUY, reasoning="x", entry_price="189.5")
-        assert p.entry_price == 189.5
+        p = TraderProposal(
+            action=TraderAction.BUY,
+            reasoning="x",
+            bull_case="b",
+            bear_case="c",
+            win_probability=60,
+            stop_atr_multiple="2.5",
+        )
+        assert p.stop_atr_multiple == 2.5
 
     def test_pm_nullish_price_target_coerces_to_none(self):
         d = PortfolioDecision(
@@ -99,43 +170,6 @@ class TestNullishFloatCoercion:
             price_target="N/A",
         )
         assert d.price_target is None
-
-    def test_percentage_answer_to_a_price_field_becomes_none(self):
-        # The Trader is asked for concrete levels and may answer a price field
-        # with a distance ("15%"), which failed the whole proposal (#1288).
-        # A percentage cannot be salvaged: 15% must not become a $15 stop.
-        for pct in ("15%", " 7.5% ", "-10%"):
-            p = TraderProposal(
-                action=TraderAction.BUY,
-                reasoning="x",
-                entry_price=pct,
-                stop_loss=pct,
-            )
-            assert p.entry_price is None
-            assert p.stop_loss is None
-
-    def test_human_formatted_price_is_reduced_to_its_number(self):
-        p = TraderProposal(
-            action=TraderAction.BUY,
-            reasoning="x",
-            entry_price="$1,234.50",
-            stop_loss="1,180",
-        )
-        assert p.entry_price == 1234.50
-        assert p.stop_loss == 1180.0
-
-    def test_one_bad_field_no_longer_fails_the_whole_proposal(self):
-        # Previously a single '15%' raised, forcing a free-text retry that lost
-        # the action and reasoning; now the rest of the proposal survives.
-        p = TraderProposal(
-            action=TraderAction.SELL,
-            reasoning="downgrade on margin compression",
-            entry_price="612.40",
-            stop_loss="15%",
-        )
-        assert p.action is TraderAction.SELL
-        assert p.entry_price == 612.40
-        assert p.stop_loss is None
 
 
 @pytest.mark.unit
@@ -183,6 +217,9 @@ def _structured_trader_llm(captured: dict, proposal: TraderProposal | None = Non
         proposal = TraderProposal(
             action=TraderAction.BUY,
             reasoning="Strong setup.",
+            bull_case="Momentum building.",
+            bear_case="Macro headwinds.",
+            win_probability=60,
         )
     structured = MagicMock()
     structured.invoke.side_effect = lambda prompt: (
@@ -218,8 +255,11 @@ class TestTraderAgent:
         proposal = TraderProposal(
             action=TraderAction.BUY,
             reasoning="AI capex cycle intact; institutional flows constructive.",
-            entry_price=189.5,
-            stop_loss=178.0,
+            bull_case="Datacenter demand accelerating.",
+            bear_case="Export-control overhang.",
+            win_probability=64,
+            stop_atr_multiple=2.0,
+            target_r_multiple=2.0,
             position_sizing="6% of portfolio",
         )
         llm = _structured_trader_llm(captured, proposal)
@@ -227,7 +267,10 @@ class TestTraderAgent:
         result = trader(_make_trader_state())
         plan = result["trader_investment_plan"]
         assert "**Action**: Buy" in plan
-        assert "**Entry Price**: 189.5" in plan
+        # No Entry Price line: this state has no verified close or ATR, so
+        # Python has nothing to compute a level from and the proposal carries
+        # none. That is the point — an absent level, never a guessed one.
+        assert "Entry Price" not in plan
         assert "FINAL TRANSACTION PROPOSAL: **BUY**" in plan
         # The same rendered markdown is also added to messages for downstream agents.
         assert plan in result["messages"][0].content
@@ -395,10 +438,31 @@ class TestRenderSentimentReport:
             )
             assert band.value in render_sentiment_report(report)
 
-    def test_score_out_of_range_rejected(self):
+    def test_a_percentage_score_is_rescaled_rather_than_rejected(self):
+        """Models answer this 0-10 field on a 0-100 scale — 52 and 48 were seen
+        in real runs. Rejecting threw away the narrative and the band with it,
+        and 52 out of 100 means the same as 5.2 out of 10."""
+        report = SentimentReport(
+            overall_band=SentimentBand.BULLISH, overall_score=52.0,
+            confidence="high", narrative="n",
+        )
+
+        assert report.overall_score == pytest.approx(5.2)
+
+    def test_a_score_already_in_range_is_left_alone(self):
+        report = SentimentReport(
+            overall_band=SentimentBand.BULLISH, overall_score=8.5,
+            confidence="high", narrative="n",
+        )
+
+        assert report.overall_score == pytest.approx(8.5)
+
+    def test_a_score_beyond_any_scale_is_still_rejected(self):
+        """Loose is not absent. 250 is not a percentage misread, it is the
+        wrong kind of number."""
         with pytest.raises(ValidationError):
             SentimentReport(
-                overall_band=SentimentBand.BULLISH, overall_score=11.0,
+                overall_band=SentimentBand.BULLISH, overall_score=250.0,
                 confidence="high", narrative="n",
             )
 
@@ -537,11 +601,6 @@ def test_a_field_the_model_did_not_give_says_so():
     assert "Price Target" in rendered and "not provided" in rendered.lower()
 
 
-@pytest.mark.unit
-def test_the_trader_names_the_levels_it_did_not_give():
-    from tradingagents.agents.schemas import TraderAction, TraderProposal, render_trader_proposal
-
-    rendered = render_trader_proposal(TraderProposal(action=TraderAction.HOLD, reasoning="r"))
-    for field in ("Entry Price", "Stop Loss", "Position Sizing"):
-        assert field in rendered
-    assert rendered.lower().count("not provided") == 3
+# Upstream also names the trader's Entry Price and Stop Loss as "not provided".
+# This fork has neither field: the trader states ATR multiples and Python computes
+# every level, so there is no model-written price to report as missing.

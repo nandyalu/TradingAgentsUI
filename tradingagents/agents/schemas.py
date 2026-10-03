@@ -16,12 +16,17 @@ so that:
   memory log, and saved reports keep working unchanged
 """
 
+
 from __future__ import annotations
+
+import logging
 
 from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -161,34 +166,179 @@ class TraderProposal(BaseModel):
             "the research plan. Two to four sentences."
         ),
     )
-    entry_price: float | None = Field(
-        default=None,
+    bull_case: str = Field(
         description=(
-            "Optional entry price target as an absolute number in the instrument's "
-            "quote currency (e.g. 189.5), never a percentage or a range. Omit it "
-            "if you cannot state a specific level."
+            "Bull case: the 2-4 strongest arguments FOR upside / taking this "
+            "position, each grounded in specific evidence (fundamentals, "
+            "technicals, sentiment, catalysts)."
         ),
     )
-    stop_loss: float | None = Field(
-        default=None,
+    bear_case: str = Field(
         description=(
-            "Optional stop-loss as an absolute price in the instrument's quote "
-            "currency (e.g. 172.0), never a percentage. Convert a percentage "
-            "distance to the price level it implies, or omit it."
+            "Bear case: the 2-4 strongest arguments AGAINST the position / "
+            "pointing to downside, each grounded in specific evidence. Be "
+            "genuinely critical; do not strawman the opposing view."
         ),
     )
+    win_probability: float = Field(
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Win probability (0-100): your estimated likelihood that the "
+            "directional thesis plays out, weighing the bull case against the "
+            "bear case. Do not default to 50 — commit to a considered estimate."
+        ),
+    )
+    # **The model states distances, never prices.** It used to be asked for
+    # entry, stop and target in the quote currency, and a small model filled
+    # those fields from what it remembered of the ticker: $2,000 for GOOG on a
+    # day it traded at $357, $30 for VERI at $1.26. Prompting against it helped
+    # and did not stop it, because a model that can type a number can type the
+    # wrong one.
+    #
+    # A multiple cannot be a remembered price. Python turns these into levels
+    # from the verified close and ATR, so the arithmetic is checkable and the
+    # only thing the model decides is how much room to give the trade — which
+    # is the judgement worth having from it.
+    # The bounds here are deliberately loose. They exist to reject a value that
+    # is the wrong *kind* of thing, not one that is merely a bad plan.
+    # `resolve_levels` applies the judgement, because a schema violation costs
+    # the whole proposal: a run answered 10.75 and Pydantic rejected it, so the
+    # structured call failed, fell back to free text, and the reasoning and win
+    # probability went out with the one number that was unusable.
+    stop_atr_multiple: float | None = Field(
+        default=None,
+        ge=0.1,
+        le=100.0,
+        description=(
+            "How far the stop sits from the entry, counted in ATRs (average "
+            "true range). Typical swing trades use 1.5 to 3. Smaller means a "
+            "tighter stop that ordinary noise may trigger; larger risks more "
+            "per share. Give this whenever the action is Buy or Sell. Do NOT "
+            "give a price — the exact level is computed from the verified "
+            "snapshot."
+        ),
+    )
+    target_r_multiple: float | None = Field(
+        default=None,
+        ge=0.1,
+        le=100.0,
+        description=(
+            "How much the trade aims to make, as a multiple of what it risks. "
+            "2 means the target is twice as far from entry as the stop is, so "
+            "the risk/reward is 2:1. Give this whenever the action is Buy or "
+            "Sell. Do NOT give a price."
+        ),
+    )
+
+
     position_sizing: str | None = Field(
         default=None,
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
 
-    @field_validator("entry_price", "stop_loss", mode="before")
+    @field_validator("stop_atr_multiple", "target_r_multiple", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
 
-def render_trader_proposal(proposal: TraderProposal) -> str:
+MAX_SENSIBLE_STOP_ATR = 6.0
+MAX_SENSIBLE_TARGET_R = 10.0
+
+
+def resolve_levels(proposal: "TraderProposal", basis: dict | None) -> dict:
+    """Turn the proposal's multiples into entry, stop and target prices.
+
+    Python owns this arithmetic so the levels cannot be recalled from training.
+    ``basis`` is ``{"close", "atr"}`` from ``verified_levels_basis`` — computed
+    from the same OHLCV the analysts read.
+
+    Returns all-``None`` when there is no basis or no multiples, which is the
+    honest answer: a plan with no levels, rather than levels nobody can defend.
+    Hold takes no levels either, since there is no trade to place them around.
+    """
+    empty = {"entry_price": None, "stop_loss": None, "target_price": None}
+    if basis is None or proposal.action is TraderAction.HOLD:
+        return empty
+    stop_mult, target_mult = proposal.stop_atr_multiple, proposal.target_r_multiple
+    if stop_mult is None or target_mult is None:
+        return empty
+
+    # Where the judgement lives, rather than in the schema. A swing trade stops
+    # 1.5 to 3 ATRs away; past about 6 the level is so far from the entry that
+    # it is not managing risk, and a target beyond 10R is not a plan either.
+    # Refusing here costs only the levels, and the proposal's reasoning, bull
+    # and bear cases and win probability all survive.
+    if stop_mult > MAX_SENSIBLE_STOP_ATR or target_mult > MAX_SENSIBLE_TARGET_R:
+        return empty
+
+    close, atr = basis["close"], basis["atr"]
+    risk = stop_mult * atr
+    # A stop wider than the price itself would put the level at or below zero.
+    if risk >= close:
+        return empty
+    # Direction follows the action: a long stops below and targets above, a
+    # short does the reverse. Getting this backwards would store a stop that
+    # triggers the instant it is placed, which is the failure
+    # _levels_on_the_wrong_side exists to catch downstream.
+    sign = -1.0 if proposal.action is TraderAction.BUY else 1.0
+    stop = close + sign * risk
+    target = close - sign * risk * target_mult
+    if target <= 0:
+        return empty
+    return {
+        "entry_price": round(close, 2),
+        "stop_loss": round(stop, 2),
+        "target_price": round(target, 2),
+    }
+
+
+def _render_trade_review(proposal: TraderProposal, levels: dict) -> str:
+    """Probability + risk/reward + expected-value review.
+
+    The win probability comes from the model. Everything else — the levels in
+    ``levels``, the risk/reward ratio, the expected value in R-multiples and
+    the breakeven win-rate — is computed in Python, so the numbers stay
+    arithmetically consistent and none of them can be recalled from training.
+    """
+    lines = ["### Probability & Risk/Reward"]
+    prob = proposal.win_probability
+    lines.append(f"- **Win Probability**: {prob:.0f}%")
+
+    rr = None
+    if (
+        levels["entry_price"] is not None
+        and levels["stop_loss"] is not None
+        and levels["target_price"] is not None
+    ):
+        reward = abs(levels["target_price"] - levels["entry_price"])
+        risk = abs(levels["entry_price"] - levels["stop_loss"])
+        if risk > 0:
+            rr = reward / risk
+            lines.append(
+                f"- **Risk/Reward Ratio**: {rr:.2f} : 1 "
+                f"(potential +{reward:.2f} vs risk -{risk:.2f})"
+            )
+
+    if rr is not None:
+        p = prob / 100.0
+        ev_r = p * rr - (1.0 - p)  # expected value in units of risk (R-multiple)
+        breakeven = 100.0 / (1.0 + rr)
+        verdict = "favorable" if ev_r > 0 else "unfavorable"
+        lines.append(f"- **Expected Value**: {ev_r:+.2f}R ({verdict})")
+        lines.append(
+            f"- **Breakeven Win-Rate**: {breakeven:.0f}% "
+            f"(current {prob:.0f}% is {'above' if prob > breakeven else 'below'} breakeven)"
+        )
+    else:
+        lines.append(
+            "- **Risk/Reward Ratio**: n/a (needs entry / stop / target prices)"
+        )
+    return "\n".join(lines)
+
+
+def render_trader_proposal(proposal: TraderProposal, levels: dict | None = None) -> str:
     """Render a TraderProposal to markdown.
 
     The trailing ``FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**`` line is
@@ -199,13 +349,24 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         f"**Action**: {proposal.action.value}",
         "",
         f"**Reasoning**: {proposal.reasoning}",
+        "",
+        f"**Bull Case**: {proposal.bull_case}",
+        "",
+        f"**Bear Case**: {proposal.bear_case}",
     ]
-    # Named even when absent, so a reader can tell a level the trader chose not
-    # to give from one the schema never asked for.
-    for label, value in (("Entry Price", proposal.entry_price),
-                         ("Stop Loss", proposal.stop_loss),
-                         ("Position Sizing", proposal.position_sizing)):
-        parts.extend(["", f"**{label}**: {value if value is not None and value != '' else 'not provided'}"])
+    # The rendered shape is unchanged on purpose. Downstream consumers parse
+    # these lines out of the markdown, so moving who computes the number must
+    # not move where it appears.
+    levels = levels or {"entry_price": None, "stop_loss": None, "target_price": None}
+    if levels["entry_price"] is not None:
+        parts.extend(["", f"**Entry Price**: {levels['entry_price']}"])
+    if levels["stop_loss"] is not None:
+        parts.extend(["", f"**Stop Loss**: {levels['stop_loss']}"])
+    if levels["target_price"] is not None:
+        parts.extend(["", f"**Target Price**: {levels['target_price']}"])
+    if proposal.position_sizing:
+        parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
+    parts.extend(["", _render_trade_review(proposal, levels)])
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
@@ -327,9 +488,15 @@ class SentimentReport(BaseModel):
             "Use Neutral only when all sources are genuinely silent or non-committal."
         ),
     )
+    # Bound at 100, not 10, with the out-of-range case normalised below. A
+    # tight bound rejected the whole report over this one field: models
+    # answered 52 and 48 on a 0-10 scale, reading it as a percentage, and
+    # Pydantic threw away the narrative and the band along with the number.
+    # Same shape as the trader's stop multiple — loosen the schema, put the
+    # judgement in code.
     overall_score: float = Field(
         ge=0.0,
-        le=10.0,
+        le=100.0,
         description=(
             "Numeric sentiment intensity on a 0–10 scale. "
             "0 = maximally bearish, 5 = neutral, 10 = maximally bullish. "
@@ -339,6 +506,24 @@ class SentimentReport(BaseModel):
             "Only the 0–10 bounds are enforced."
         ),
     )
+    @field_validator("overall_score", mode="after")
+    @classmethod
+    def _percentage_to_ten_point(cls, value: float) -> float:
+        """Rescale a 0-100 answer onto the 0-10 scale the field asks for.
+
+        A score above 10 is not a stronger opinion; it is the same opinion on
+        the wrong scale, and 52 on a 0-100 scale means the same thing as 5.2 on
+        a 0-10 one. Rescaling keeps the report, which carries the narrative and
+        the band as well as this number.
+        """
+        if value > 10.0:
+            logger.warning(
+                "sentiment overall_score %.0f is on a 0-100 scale; reading it as %.1f",
+                value, value / 10.0,
+            )
+            return value / 10.0
+        return value
+
     confidence: Literal["low", "medium", "high"] = Field(
         description=(
             "Confidence in the assessment based on data quality and sample size. "

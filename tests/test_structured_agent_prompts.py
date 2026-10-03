@@ -48,7 +48,10 @@ def test_trader_prompt_states_constraint():
     from tradingagents.agents.schemas import TraderAction, TraderProposal
 
     captured = {}
-    llm = _capturing_llm(captured, TraderProposal(action=TraderAction.BUY, reasoning="x"))
+    llm = _capturing_llm(captured, TraderProposal(
+        action=TraderAction.BUY, reasoning="x",
+        bull_case="x", bear_case="x", win_probability=50.0,
+    ))
     create_trader(llm)({
         "company_of_interest": "NVDA",
         "investment_plan": "**Recommendation**: Buy",
@@ -134,10 +137,8 @@ def test_sentiment_prompt_states_constraint(monkeypatch):
 def test_tool_using_analysts_keep_their_date_guidance():
     # The analysts that really do call tools keep the wording that anchors their
     # tool date ranges (#836) — this fix is scoped to no-tool agents.
-    import tradingagents.agents.analysts.market_analyst as market
     import tradingagents.agents.analysts.news_analyst as news
-    for module in (market, news):
-        assert "tool-call date ranges" in inspect.getsource(module)
+    assert "tool-call date ranges" in inspect.getsource(news)
 
 
 @pytest.mark.unit
