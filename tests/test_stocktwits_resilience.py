@@ -25,7 +25,7 @@ def _raise(exc):
         def __exit__(self_inner, *a):
             return False
 
-        def read(self_inner):
+        def read(self_inner, *a):
             raise exc
     return _Resp()
 
@@ -92,7 +92,7 @@ def _stream(*bodies):
         def __exit__(self, *a):
             return False
 
-        def read(self):
+        def read(self, *a):
             return json.dumps(payload).encode()
     return _Resp()
 
@@ -121,3 +121,22 @@ def test_html_entities_in_message_bodies_are_decoded():
     with patch.object(stocktwits, "urlopen", return_value=_stream("S&amp;P wasn&#39;t up")):
         out = stocktwits.fetch_stocktwits_messages("NVDA")
     assert "S&P wasn't up" in out
+@pytest.mark.unit
+def test_oversized_body_is_rejected_before_parsing():
+    """A body past the cap must degrade, not be buffered and parsed in full."""
+
+    class _BigResp:
+        def __enter__(self_inner):
+            return self_inner
+
+        def __exit__(self_inner, *a):
+            return False
+
+        def read(self_inner, *a):
+            return b"x" * 100
+
+    with patch.object(stocktwits, "_MAX_FEED_BYTES", 10), \
+            patch.object(stocktwits, "urlopen", return_value=_BigResp()):
+        out = stocktwits.fetch_stocktwits_messages("NVDA")
+    assert out.startswith("<stocktwits unavailable")
+    assert "HTTPException" in out
