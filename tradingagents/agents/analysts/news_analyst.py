@@ -1,7 +1,9 @@
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from tradingagents.agents.analysts.turn import take_turn
+from tradingagents.agents.analysts.turn import WRAP_UP, take_turn
 from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
+from tradingagents.agents.tool_call_recovery import invoke_with_tool_call_recovery
 from tradingagents.agents.tools import (
     get_global_news,
     get_macro_indicators,
@@ -18,15 +20,30 @@ TOOLS = (
 )
 
 
-def create_news_analyst(llm):
+def create_news_analyst(llm, google_search_grounding: bool = False):
     def news_analyst_node(state):
         current_date = state["trade_date"]
         asset_type = state.get("asset_type", "stock")
         asset_label = "company" if asset_type == "stock" else "asset"
         instrument_context = get_instrument_context_from_state(state)
 
+        tools = list(TOOLS)
+        is_google_llm = (
+            hasattr(llm, "__class__")
+            and "google" in llm.__class__.__module__.lower()
+        )
+        use_search_grounding = is_google_llm and google_search_grounding
+
+        search_instruction = ""
+        if use_search_grounding:
+            tools.append({"google_search": {}})
+            search_instruction = (
+                " In addition, you have access to Google Search grounding to perform web queries for recent earnings, "
+                "SEC filings, press releases, Deep Research insights, and sector shifts."
+            )
+
         system_message = (
-            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(start_date, end_date) for news about the {asset_label} under analysis, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
+            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(start_date, end_date) for news about the {asset_label} under analysis, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events).{search_instruction} Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )
@@ -49,11 +66,27 @@ def create_news_analyst(llm):
         )
 
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in TOOLS]))
+        tool_names = [t.name if hasattr(t, "name") else next(iter(t)) for t in tools]
+        prompt = prompt.partial(tool_names=", ".join(tool_names))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        result, report = take_turn(prompt, llm, TOOLS, state["messages"])
+        messages = state["messages"]
+        if messages and isinstance(messages[-1], HumanMessage) and messages[-1].content == WRAP_UP:
+            # The tool rounds are spent: upstream's last turn, with no tools.
+            result, report = take_turn(prompt, llm, TOOLS, messages)
+        else:
+            bind_kwargs = {}
+            if use_search_grounding:
+                # Gemini rejects a built-in tool (google_search) mixed with custom
+                # function tools unless this is set explicitly. Confirmed 2026-09-17:
+                # the same request returns 400 INVALID_ARGUMENT without it.
+                bind_kwargs["tool_config"] = {
+                    "include_server_side_tool_invocations": True
+                }
+            chain = prompt | llm.bind_tools(tools, **bind_kwargs)
+            result = invoke_with_tool_call_recovery(chain, messages, tool_names, "News Analyst")
+            report = "" if result.tool_calls else result.content
 
         return {
             "messages": [result],
