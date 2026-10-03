@@ -10,6 +10,7 @@ the routing layer treats it as "unavailable" rather than a hard crash.
 """
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 
 import pytz
@@ -143,6 +144,16 @@ def _fred_today() -> str:
     return datetime.now(FRED_TZ).strftime("%Y-%m-%d")
 
 
+# A request error is scrubbed by get_scrubbed. FRED also quotes the URL in the
+# JSON body of a 400, which no request helper sees, so the pattern stays here.
+_API_KEY_IN_URL = re.compile(r"(api_key=)[^&\s]+")
+
+
+def redact(text: str) -> str:
+    """Replace any ``api_key=...`` value in ``text`` with a placeholder."""
+    return _API_KEY_IN_URL.sub(r"\1REDACTED", str(text))
+
+
 def _request(path: str, params: dict) -> dict:
     """GET a FRED endpoint, surfacing FRED's JSON error body on a bad request."""
     api_key = get_api_key()
@@ -160,7 +171,7 @@ def _request(path: str, params: dict) -> dict:
             message = response.json().get("error_message", response.text)
         except ValueError:
             message = response.text
-        raise ValueError(f"FRED request failed: {message}")
+        raise ValueError(f"FRED request failed: {redact(message)}")
     return response.json()
 
 
