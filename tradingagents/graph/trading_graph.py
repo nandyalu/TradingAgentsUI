@@ -14,7 +14,7 @@ from tradingagents.dataflows.config import run_config, run_config_context, set_c
 from tradingagents.dataflows.date_window import get_current_date, is_historical
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.llm_clients import create_tier_client, tier_provider
+from tradingagents.llm_clients import create_llm_client, create_tier_client, request_label, tier_provider
 from tradingagents.memory import TradingMemoryLog, settlement
 from tradingagents.memory.reflection import Reflector
 from tradingagents.reporting import write_report_tree
@@ -213,7 +213,7 @@ class TradingAgentsGraph:
         if horizon not in ("swing", "position"):
             raise ValueError(f"horizon must be 'swing' or 'position', got {horizon!r}")
 
-        with run_config(self.config), \
+        with run_config(self.config), request_label.ticker(company_name), \
                 self.checkpoint_scope(company_name, trade_date, asset_type, portfolio,
                                       horizon) as thread_id_value:
             return self._run_graph(

@@ -132,6 +132,15 @@ def build_llm_kwargs(config: dict) -> dict[str, Any]:
         key = "max_output_tokens" if provider == "google" else "max_tokens"
         kwargs[key] = _coerce_max_tokens(max_tokens)
 
+    # Name each request after the graph node that sends it, for a proxy in
+    # front of a local server pool. OpenAI-compatible providers only.
+    label = config.get("llm_request_label")
+    if label:
+        from .openai_client import is_openai_compatible
+        if is_openai_compatible(provider):
+            from .request_label import label_kwargs
+            kwargs.update(label_kwargs(str(label)))
+
     return kwargs
 
 
@@ -153,5 +162,8 @@ def create_tier_client(config: dict, tier: str, **extra) -> BaseLLMClient:
     else:
         base_url = config.get(f"{tier}_think_backend_url")
     kwargs = build_llm_kwargs({**config, "llm_provider": provider})
+    if "callbacks" in extra:
+        # Keep any callbacks build_llm_kwargs added, such as the request label.
+        extra = {**extra, "callbacks": [*kwargs.pop("callbacks", []), *extra["callbacks"]]}
     return create_llm_client(provider=provider, model=config[f"{tier}_think_llm"], base_url=base_url,
                              **kwargs, **extra)
