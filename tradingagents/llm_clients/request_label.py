@@ -57,7 +57,12 @@ class NodeLabelHandler(BaseCallbackHandler):
         self._tokens: dict = {}
 
     def _start(self, metadata: dict | None, run_id) -> None:
-        name = (metadata or {}).get("langgraph_node")
+        metadata = metadata or {}
+        # An analyst runs as a subgraph inside its own node, so langgraph_node
+        # names the inner node ("agent"). The namespace starts with the outer
+        # one: "Market Analyst:<id>|agent:<id>".
+        namespace = metadata.get("langgraph_checkpoint_ns") or ""
+        name = namespace.split("|", 1)[0].split(":", 1)[0] or metadata.get("langgraph_node")
         if name:
             self._tokens[run_id] = _node.set(name)
 

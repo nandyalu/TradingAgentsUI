@@ -86,3 +86,22 @@ def test_the_ticker_reaches_the_label_inside_the_graph():
         graph.compile().invoke({"out": ""})
         llm.invoke("hi")
     assert seen == ["app NVDA: Trader", "app NVDA"]
+
+
+def test_a_call_inside_a_subgraph_carries_the_outer_node():
+    seen: list = []
+    llm = _llm(seen)
+
+    class State(TypedDict):
+        out: str
+
+    inner = StateGraph(State)
+    inner.add_node("agent", lambda s: {"out": llm.invoke("hi").content})
+    inner.add_edge(START, "agent")
+    inner.add_edge("agent", END)
+    outer = StateGraph(State)
+    outer.add_node("Market Analyst", inner.compile())
+    outer.add_edge(START, "Market Analyst")
+    outer.add_edge("Market Analyst", END)
+    outer.compile().invoke({"out": ""})
+    assert seen == ["app: Market Analyst"]
