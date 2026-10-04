@@ -132,4 +132,13 @@ def build_llm_kwargs(config: dict) -> dict[str, Any]:
         key = "max_output_tokens" if provider == "google" else "max_tokens"
         kwargs[key] = _coerce_max_tokens(max_tokens)
 
+    # Name each request after the graph node that sends it, for a proxy in
+    # front of a local server pool. OpenAI-compatible providers only.
+    label = config.get("llm_request_label")
+    if label:
+        from .openai_client import is_openai_compatible
+        if is_openai_compatible(provider):
+            from .request_label import label_kwargs
+            kwargs.update(label_kwargs(str(label)))
+
     return kwargs

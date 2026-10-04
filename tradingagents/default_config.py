@@ -30,6 +30,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
     "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
+    "TRADINGAGENTS_LLM_REQUEST_LABEL":    "llm_request_label",
 }
 
 
@@ -130,6 +131,11 @@ def build_default_config() -> dict:
         # the SDK default. llm_max_retries also bounds NormalizedChatOpenAI's retry
         # of an undecodable JSON body.
         "llm_timeout": None,
+        # The app's name for an X-Pool-Label header on each request, which a
+        # proxy in front of a local server pool shows with the graph node that
+        # sent it (TRADINGAGENTS_LLM_REQUEST_LABEL). None sends no header.
+        # OpenAI-compatible providers only. See llm_clients/request_label.py.
+        "llm_request_label": None,
         # Checkpoint/resume: when True, LangGraph saves state after each node
         # so a crashed run can resume from the last successful step.
         "checkpoint_enabled": False,

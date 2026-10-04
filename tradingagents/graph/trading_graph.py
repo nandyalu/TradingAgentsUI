@@ -14,7 +14,7 @@ from tradingagents.dataflows.config import run_config, run_config_context, set_c
 from tradingagents.dataflows.date_window import get_current_date, is_historical
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.llm_clients import build_llm_kwargs, create_llm_client
+from tradingagents.llm_clients import build_llm_kwargs, create_llm_client, request_label
 from tradingagents.memory import TradingMemoryLog, settlement
 from tradingagents.memory.reflection import Reflector
 from tradingagents.reporting import write_report_tree
@@ -79,7 +79,8 @@ class TradingAgentsGraph:
         llm_kwargs = build_llm_kwargs(self.config)
 
         if self.callbacks:
-            llm_kwargs["callbacks"] = self.callbacks
+            # Keep any callbacks build_llm_kwargs added, such as the request label.
+            llm_kwargs["callbacks"] = [*llm_kwargs.get("callbacks", []), *self.callbacks]
 
         deep_client = create_llm_client(
             provider=self.config["llm_provider"],
@@ -228,7 +229,7 @@ class TradingAgentsGraph:
         if horizon not in ("swing", "position"):
             raise ValueError(f"horizon must be 'swing' or 'position', got {horizon!r}")
 
-        with run_config(self.config), \
+        with run_config(self.config), request_label.ticker(company_name), \
                 self.checkpoint_scope(company_name, trade_date, asset_type, portfolio,
                                       horizon) as thread_id_value:
             return self._run_graph(
