@@ -4,7 +4,7 @@
 
 This is a fork of [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents). The [trading-helper](https://github.com/nandyalu/trading-helper) project uses it to run one autonomous trading agent on a simulated account.
 
-The default branch, `trading-helper-custom`, is rebased onto upstream v0.5.2. It adds these changes.
+The default branch, `trading-helper-custom`, is rebased onto upstream v0.6.0. It adds these changes.
 
 **Cherry-picked from open upstream pull requests:**
 
